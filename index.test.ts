@@ -197,7 +197,7 @@ describe("obsidian-livesync-cognee plugin", () => {
       await fs.readFile(path.join(process.cwd(), "openclaw.plugin.json"), "utf8"),
     ) as { version?: string };
 
-    expect(plugin.version).toBe("0.1.0");
+    expect(plugin.version).toBe("0.1.1");
     expect(packageJson.version).toBe(plugin.version);
     expect(pluginManifest.version).toBe(plugin.version);
   });

@@ -60,6 +60,13 @@ From npm:
 openclaw plugins install @slime-turing/obsidian-livesync-cognee
 ```
 
+Verify the published package and plugin wiring:
+
+```bash
+npm view @slime-turing/obsidian-livesync-cognee version
+openclaw obsidian-vault status
+```
+
 From a local checkout:
 
 ```bash
