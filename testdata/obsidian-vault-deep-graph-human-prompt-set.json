@@ -1,0 +1,68 @@
+[
+  {
+    "id": "friday-upgrade-window",
+    "prompt": "I'm trying to sort out Friday morning. If Maya gets pulled into the Atlas upgrade because the Orion shipment landed late, who should take the Orion vendor check-in, and what's the earliest the upgrade can start?",
+    "whyItFeelsHuman": "It sounds like someone coordinating a real schedule conflict instead of narrating the reasoning task.",
+    "expectedGraphLinks": [
+      "Northport strike",
+      "Orion shipment arrival",
+      "10-hour stabilization rule",
+      "Maya Friday schedule",
+      "Rafi backup coverage"
+    ]
+  },
+  {
+    "id": "another-slip-counterfactual",
+    "prompt": "If Orion slips another six hours, does the backup plan still hold, or does Maya's Friday schedule break somewhere else first?",
+    "whyItFeelsHuman": "It asks a practical follow-up someone would ask after hearing the first answer.",
+    "expectedGraphLinks": [
+      "current Orion arrival",
+      "stabilization math",
+      "Maya Friday calls",
+      "Cedar demo dependency",
+      "backup assignment"
+    ]
+  },
+  {
+    "id": "why-rafi-not-maya",
+    "prompt": "Why is Rafi the one who takes Orion instead of Maya just juggling both calls?",
+    "whyItFeelsHuman": "It asks for justification, not just the final answer.",
+    "expectedGraphLinks": [
+      "Maya schedule collision",
+      "Cedar requires Maya personally",
+      "Orion check-in can be delegated to Rafi"
+    ]
+  },
+  {
+    "id": "cite-the-bridge",
+    "prompt": "Can you walk me through the exact chain that turns the shipment delay into a staffing decision, with the notes that establish each step?",
+    "whyItFeelsHuman": "It still sounds conversational but asks for grounded multi-hop reasoning.",
+    "expectedGraphLinks": [
+      "strike note",
+      "shipment note",
+      "stabilization note",
+      "schedule note",
+      "backup note"
+    ]
+  },
+  {
+    "id": "cedar-priority-check",
+    "prompt": "If Maya can only be in one place around that window, what makes Cedar the thing she keeps and Orion the thing she hands off?",
+    "whyItFeelsHuman": "It asks for the decision principle behind the handoff.",
+    "expectedGraphLinks": [
+      "Cedar demo obligation",
+      "Orion check-in coverage",
+      "upgrade timing"
+    ]
+  },
+  {
+    "id": "approval-chain-human",
+    "prompt": "I forgot how that May launch budget finally got approved after Iris stepped back. Who actually signed off in the end?",
+    "whyItFeelsHuman": "It sounds like someone asking from partial memory rather than setting up an eval.",
+    "expectedGraphLinks": [
+      "Iris delegation",
+      "review handoff",
+      "final approver"
+    ]
+  }
+]

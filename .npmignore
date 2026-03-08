@@ -1,0 +1,7 @@
+coverage/
+node_modules/
+*.log
+*.test.ts
+src/**/*.test.ts
+index.test.ts
+.github/

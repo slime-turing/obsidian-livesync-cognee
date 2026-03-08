@@ -1,0 +1,57 @@
+{
+  "name": "@slime-turing/obsidian-livesync-cognee",
+  "version": "0.1.0",
+  "description": "OpenClaw sync bridge for Obsidian LiveSync vaults and Cognee ingestion",
+  "keywords": [
+    "openclaw",
+    "obsidian",
+    "livesync",
+    "couchdb",
+    "cognee"
+  ],
+  "homepage": "https://github.com/slime-turing/obsidian-livesync-cognee#readme",
+  "bugs": {
+    "url": "https://github.com/slime-turing/obsidian-livesync-cognee/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/slime-turing/obsidian-livesync-cognee.git"
+  },
+  "type": "module",
+  "files": [
+    "README.md",
+    "LICENSE",
+    "openclaw.plugin.json",
+    "index.ts",
+    "src/cli.ts",
+    "src/config.ts",
+    "src/controller.ts",
+    "src/tools.ts",
+    "src/types.ts"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.3.2 <2027.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.3",
+    "commander": "^14.0.3",
+    "openclaw": "2026.3.2",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "install": {
+      "npmSpec": "@slime-turing/obsidian-livesync-cognee",
+      "localPath": "obsidian-livesync-cognee",
+      "defaultChoice": "npm"
+    }
+  }
+}

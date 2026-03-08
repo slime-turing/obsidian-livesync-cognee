@@ -1,0 +1,70 @@
+[
+  {
+    "scenarioId": "friday-upgrade-window-low",
+    "budget": "low",
+    "runId": "run-low-human-graph",
+    "sessionId": "session-low-human-graph",
+    "sessionKey": "policy:low:human-graph",
+    "systemPrompt": "Follow the retrieval policy. Start with shared memory, and only reach for the graph when the answer still has a missing link that matters.",
+    "prompt": "I'm trying to sort out Friday morning. If Maya gets pulled into the Atlas upgrade because the Orion shipment landed late, who should take the Orion vendor check-in, and what's the earliest the upgrade can start?",
+    "afterToolCalls": [
+      {
+        "recommendation": "continue_only_if_more_relationship_context_is_needed",
+        "uniqueSourcePaths": [
+          "projects/deep-graph-20260308-02-orion-shipment.md",
+          "projects/deep-graph-20260308-04-maya-friday-schedule.md"
+        ]
+      },
+      {
+        "recommendation": "refine_once_if_a_new_bridge_emerged_otherwise_stop",
+        "uniqueSourcePaths": [
+          "projects/deep-graph-20260308-02-orion-shipment.md",
+          "projects/deep-graph-20260308-05-orion-checkin.md"
+        ]
+      }
+    ],
+    "expect": {
+      "toolCalls": 2,
+      "lastRecommendation": "refine_once_if_a_new_bridge_emerged_otherwise_stop"
+    }
+  },
+  {
+    "scenarioId": "friday-upgrade-window-high",
+    "budget": "high",
+    "runId": "run-high-human-graph",
+    "sessionId": "session-high-human-graph",
+    "sessionKey": "policy:high:human-graph",
+    "systemPrompt": "Follow the retrieval policy. Start with shared memory, and spend another graph call only if the latest result adds a real bridge that changes the answer.",
+    "prompt": "I'm trying to sort out Friday morning. If Maya gets pulled into the Atlas upgrade because the Orion shipment landed late, who should take the Orion vendor check-in, and what's the earliest the upgrade can start?",
+    "afterToolCalls": [
+      {
+        "recommendation": "continue_only_if_more_relationship_context_is_needed",
+        "uniqueSourcePaths": [
+          "projects/deep-graph-20260308-01-northport-strike.md",
+          "projects/deep-graph-20260308-02-orion-shipment.md"
+        ]
+      },
+      {
+        "recommendation": "continue_only_if_more_relationship_context_is_needed",
+        "uniqueSourcePaths": [
+          "projects/deep-graph-20260308-02-orion-shipment.md",
+          "projects/deep-graph-20260308-04-maya-friday-schedule.md",
+          "projects/deep-graph-20260308-06-cedar-demo.md"
+        ]
+      },
+      {
+        "recommendation": "answer_if_grounded_or_continue_once_to_verify_the_final_link",
+        "uniqueSourcePaths": [
+          "projects/deep-graph-20260308-02-orion-shipment.md",
+          "projects/deep-graph-20260308-05-orion-checkin.md",
+          "projects/deep-graph-20260308-06-cedar-demo.md"
+        ],
+        "answer": "Rafi Gomez covers the Orion vendor check-in, and the earliest Atlas upgrade start is 2026-03-13 04:00 UTC after the delayed arrival plus the 10-hour stabilization window."
+      }
+    ],
+    "expect": {
+      "toolCalls": 3,
+      "lastRecommendation": "answer_if_grounded_or_continue_once_to_verify_the_final_link"
+    }
+  }
+]

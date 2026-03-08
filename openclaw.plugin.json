@@ -1,0 +1,152 @@
+{
+  "id": "obsidian-livesync-cognee",
+  "version": "0.1.0",
+  "uiHints": {
+    "vaults.*.id": {
+      "label": "Vault ID"
+    },
+    "vaults.*.url": {
+      "label": "CouchDB URL"
+    },
+    "vaults.*.database": {
+      "label": "Database"
+    },
+    "vaults.*.mode": {
+      "label": "Access Mode"
+    },
+    "vaults.*.notifications.sessionKey": {
+      "label": "Notification Session Key"
+    },
+    "vaults.*.notifications.dedupeWindowSeconds": {
+      "label": "Notification Dedupe Window (sec)",
+      "advanced": true
+    },
+    "vaults.*.cognee.baseUrl": {
+      "label": "Cognee Base URL"
+    },
+    "vaults.*.cognee.datasetName": {
+      "label": "Cognee Dataset Name"
+    },
+    "vaults.*.cognee.authToken": {
+      "label": "Cognee Auth Token",
+      "sensitive": true
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["vaults"],
+    "properties": {
+      "defaults": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "pollIntervalSeconds": { "type": "number", "minimum": 5, "default": 300 },
+          "requestTimeoutMs": { "type": "number", "minimum": 1000, "default": 20000 },
+          "syncMode": { "type": "string", "enum": ["changes", "full"], "default": "changes" },
+          "mirrorRoot": { "type": "string" },
+          "snapshotRoot": { "type": "string" },
+          "notifications": { "$ref": "#/definitions/notifications" },
+          "automation": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "memify": { "$ref": "#/definitions/memifyAutomation" }
+            }
+          },
+          "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+          "cognee": { "$ref": "#/definitions/cognee" }
+        }
+      },
+      "vaults": {
+        "type": "array",
+        "items": { "$ref": "#/definitions/vault" }
+      }
+    },
+    "definitions": {
+      "notifications": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "sessionKey": { "type": "string" },
+          "onError": { "type": "boolean", "default": true },
+          "onConflict": { "type": "boolean", "default": true },
+          "wakeAgent": { "type": "boolean", "default": true },
+          "dedupeWindowSeconds": { "type": "number", "minimum": 0, "default": 300 }
+        }
+      },
+      "memifyAutomation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean", "default": false },
+          "triggers": {
+            "type": "array",
+            "items": { "type": "string", "enum": ["heartbeat", "cron"] }
+          },
+          "minIntervalSeconds": { "type": "number", "minimum": 0, "default": 3600 },
+          "allSnapshots": { "type": "boolean", "default": false },
+          "notifyOnStart": { "type": "boolean", "default": false },
+          "notifyOnSuccess": { "type": "boolean", "default": true },
+          "notifyOnFailure": { "type": "boolean", "default": true }
+        }
+      },
+      "cognee": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean", "default": true },
+          "baseUrl": { "type": "string" },
+          "datasetName": { "type": "string" },
+          "datasetId": { "type": "string" },
+          "apiKey": { "type": "string" },
+          "apiKeyEnv": { "type": "string" },
+          "authToken": { "type": "string" },
+          "authTokenEnv": { "type": "string" },
+          "nodeSet": { "type": "array", "items": { "type": "string" } },
+          "cognify": { "type": "boolean", "default": true },
+          "downloadHttpLinks": { "type": "boolean", "default": true },
+          "maxLinksPerNote": { "type": "number", "minimum": 0, "default": 5 },
+          "maxLinkBytes": { "type": "number", "minimum": 1024, "default": 262144 },
+          "searchType": { "type": "string", "enum": ["CHUNKS", "GRAPH_COMPLETION"], "default": "CHUNKS" },
+          "searchTopK": { "type": "number", "minimum": 1, "default": 8 }
+        }
+      },
+      "vault": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "url", "database"],
+        "properties": {
+          "id": { "type": "string" },
+          "url": { "type": "string" },
+          "database": { "type": "string" },
+          "username": { "type": "string" },
+          "password": { "type": "string" },
+          "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+          "enabled": { "type": "boolean", "default": true },
+          "mode": { "type": "string", "enum": ["read-only", "read-write"], "default": "read-only" },
+          "syncMode": { "type": "string", "enum": ["changes", "full"], "default": "changes" },
+          "pollIntervalSeconds": { "type": "number", "minimum": 5 },
+          "requestTimeoutMs": { "type": "number", "minimum": 1000 },
+          "includeGlobs": { "type": "array", "items": { "type": "string" } },
+          "excludeGlobs": { "type": "array", "items": { "type": "string" } },
+          "mirrorRoot": { "type": "string" },
+          "snapshotRoot": { "type": "string" },
+          "passphrase": { "type": "string" },
+          "usePathObfuscation": { "type": "boolean", "default": false },
+          "handleFilenameCaseSensitive": { "type": "boolean", "default": false },
+          "autoResolveConflicts": { "type": "boolean", "default": true },
+          "notifications": { "$ref": "#/definitions/notifications" },
+          "automation": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "memify": { "$ref": "#/definitions/memifyAutomation" }
+            }
+          },
+          "cognee": { "$ref": "#/definitions/cognee" }
+        }
+      }
+    }
+  }
+}

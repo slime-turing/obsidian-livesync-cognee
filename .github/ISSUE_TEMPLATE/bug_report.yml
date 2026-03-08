@@ -1,0 +1,70 @@
+name: Bug report
+description: Report a defect in sync, conflict handling, Cognee ingestion, or OpenClaw integration.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing a sync or retrieval bug, compare your environment against the documented external protocol baselines and compatibility assumptions:
+
+        - [Protocol overview](../../docs/protocol-overview.md)
+        - [Protocol reference](../../docs/protocol-compatibility.md)
+
+        Protocol drift in Obsidian LiveSync, CouchDB, or Cognee can look like a plugin bug even when the plugin is behaving consistently with its documented assumptions.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What broke and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OpenClaw version, plugin version, Node version, deployment shape, and the external versions you compared against the protocol docs.
+      placeholder: |
+        OpenClaw:
+        Plugin:
+        Node:
+        CouchDB:
+        Cognee:
+        Obsidian LiveSync:
+    validations:
+      required: true
+  - type: textarea
+    id: protocol-check
+    attributes:
+      label: Protocol compatibility check
+      description: State whether you compared your LiveSync, CouchDB, and Cognee versions and behavior against the protocol docs, and mention any mismatch you found.
+      placeholder: |
+        I compared my environment against docs/protocol-overview.md and docs/protocol-compatibility.md.
+
+        Matching versions or behavior:
+        - CouchDB:
+        - Cognee:
+        - Obsidian LiveSync:
+
+        Suspected mismatch or unknowns:
+    validations:
+      required: true
+  - type: textarea
+    id: vault-config
+    attributes:
+      label: Vault configuration
+      description: Redact secrets, but include relevant settings such as mode, syncMode, automation.memify, and notification settings.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or conflict state
+      description: Paste sanitized logs, error text, or conflict metadata.

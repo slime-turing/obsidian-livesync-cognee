@@ -1,0 +1,68 @@
+[
+  {
+    "budget": "low",
+    "runId": "run-low-noisy-graph",
+    "sessionId": "session-low-noisy-graph",
+    "sessionKey": "policy:low:noisy-graph",
+    "systemPrompt": "Follow the retrieval policy. Prefer the shared memory first, then stop once repeated note paths stop adding a new bridge.",
+    "prompt": "Question: who finally approved the May launch budget after Iris delegated the review? Budget: low. Trace every deep-graph step.",
+    "afterToolCalls": [
+      {
+        "recommendation": "continue_only_if_more_relationship_context_is_needed",
+        "uniqueSourcePaths": [
+          "notes/iris-delegation.md",
+          "notes/may-launch-sidebar.md"
+        ]
+      },
+      {
+        "recommendation": "refine_once_if_a_new_bridge_emerged_otherwise_stop",
+        "uniqueSourcePaths": [
+          "notes/iris-delegation.md",
+          "notes/may-launch-sidebar.md"
+        ]
+      }
+    ],
+    "expect": {
+      "toolCalls": 2,
+      "lastRecommendation": "refine_once_if_a_new_bridge_emerged_otherwise_stop"
+    }
+  },
+  {
+    "budget": "high",
+    "runId": "run-high-noisy-graph",
+    "sessionId": "session-high-noisy-graph",
+    "sessionKey": "policy:high:noisy-graph",
+    "systemPrompt": "Follow the retrieval policy. Prefer the shared memory first, then use one more deep-graph call only when a result adds a real new bridge.",
+    "prompt": "Question: who finally approved the May launch budget after Iris delegated the review? Budget: high. Trace every deep-graph step.",
+    "afterToolCalls": [
+      {
+        "recommendation": "continue_only_if_more_relationship_context_is_needed",
+        "uniqueSourcePaths": [
+          "notes/iris-delegation.md",
+          "notes/may-launch-sidebar.md"
+        ]
+      },
+      {
+        "recommendation": "continue_only_if_more_relationship_context_is_needed",
+        "uniqueSourcePaths": [
+          "notes/iris-delegation.md",
+          "notes/may-launch-review.md",
+          "notes/release-approvals.md"
+        ]
+      },
+      {
+        "recommendation": "answer_if_grounded_or_continue_once_to_verify_the_final_link",
+        "uniqueSourcePaths": [
+          "notes/iris-delegation.md",
+          "notes/may-launch-review.md",
+          "notes/release-approvals.md"
+        ],
+        "answer": "Theo approved the budget after Iris delegated the review to Mina, who routed the final sign-off request."
+      }
+    ],
+    "expect": {
+      "toolCalls": 3,
+      "lastRecommendation": "answer_if_grounded_or_continue_once_to_verify_the_final_link"
+    }
+  }
+]

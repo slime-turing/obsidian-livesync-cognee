@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and operational discussion
+    url: https://github.com/slime-turing/obsidian-livesync-cognee/discussions
+    about: Use discussions for setup questions or architecture discussion that is not clearly a bug. For sync or retrieval questions, compare your environment against docs/protocol-overview.md and docs/protocol-compatibility.md first.

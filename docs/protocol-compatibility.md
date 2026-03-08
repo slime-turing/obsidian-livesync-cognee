@@ -1,0 +1,448 @@
+# External Protocol Reference
+
+This page is the maintainer-facing deep reference for the protocol surface that `obsidian-livesync-cognee` currently depends on when talking to CouchDB-backed Obsidian LiveSync vaults and the Cognee API.
+
+If you want the shorter operator-facing summary first, start with [protocol-overview.md](./protocol-overview.md).
+
+The goal is practical compatibility tracking, not a full re-specification of upstream systems. If Obsidian LiveSync, CouchDB, Cognee, or the Cognee OpenClaw integration changes behavior in a way that affects any of the requests, response shapes, or document fields listed here, this plugin may need updates.
+
+## Source baselines
+
+This plugin's protocol behavior was learned from local source clones, then narrowed to the subset actually used by this plugin's implementation:
+
+- local upstream Obsidian LiveSync source clone
+- local upstream CouchDB source clone
+- local upstream Cognee source clone
+- local upstream Cognee OpenClaw integration source clone
+
+The current recorded source baselines are:
+
+- Obsidian LiveSync: `0.25.48-1-g09115df`
+- CouchDB: `3.5.0-440-g0d8340c76`
+- Cognee: `v0.5.3-4-gbad3f309`
+- Cognee Integrations monorepo: `openclaw-v2026.2.4-12-g10ac3f3`
+- Cognee OpenClaw integration subtree: `10ac3f3`
+
+The plugin should be considered compatible only to the extent that those projects continue to expose the request and document patterns described below.
+
+## Compatibility requirement
+
+The protocol version and document model must remain compatible with what this plugin expects.
+
+- If Obsidian LiveSync changes note ids, note document shapes, chunk layout, deletion semantics, conflict inspection behavior, or path obfuscation rules, this plugin may stop syncing or writing correctly.
+- If CouchDB changes the behavior of the endpoints listed below, including response encoding or revision semantics, this plugin may need code changes.
+- If Cognee changes dataset lookup, search payloads, search response envelopes, auth login, ingestion, cognify, memify, or dataset deletion behavior, this plugin may need code changes.
+- When upstream behavior changes, update this page and the plugin implementation together.
+
+If upstream documentation and this page ever diverge, the plugin code is the immediate source of truth for runtime behavior. The main implementation lives in [src/controller.ts](../src/controller.ts) and the protocol-facing types live in [src/types.ts](../src/types.ts).
+
+## Compatibility matrix
+
+| Surface | Request or shape | Current expectation | Compatibility risk |
+| --- | --- | --- | --- |
+| incremental sync | `GET /{db}/_changes?include_docs=true&limit=200&since=<seq>` | returns standard `_changes` rows with `doc` payloads and `last_seq` | sync checkpointing or inline doc loading breaks if response shape changes |
+| winning note fetch | `GET /{db}/{docId}` | returns current winning note revision or `404` for missing docs | note reads and writeback existence probes break if winning doc lookup semantics change |
+| chunk leaf fetch | `GET /{db}/{childId}` | returns `type: "leaf"` docs with string `data` | chunked note reconstruction breaks if leaf chunk encoding changes |
+| conflict probe | `GET /{db}/{docId}?conflicts=true` | returns current winning revision with `_conflicts` | conflict detection breaks if `_conflicts` is removed or renamed |
+| conflict bundle | `GET /{db}/{docId}?open_revs=all` | returns JSON or `multipart/mixed` entries shaped like `{ ok }` or `{ missing }` | conflict inspection breaks if response encoding or entry shape changes |
+| plain writeback | `PUT /{db}/{docId}` | accepts plain-note payloads using `type: plain`, `datatype: plain`, and `data` content | read-write vault support breaks if LiveSync write document shape changes |
+| conflict cleanup | `POST /{db}/_bulk_docs` | accepts `_deleted: true` tombstones for losing revs | auto-resolution and manual conflict resolution leave stale revs behind if bulk deletion semantics change |
+| compaction | `POST /{db}/_compact` | accepts compaction request and returns `ok: true` on acceptance | explicit compact command behavior changes or becomes misleading |
+| supported note type | `type: plain` or `type: newnote` with string `path` | treated as readable note docs | sync skips notes if LiveSync moves to different type markers |
+| supported note content | `data` string, `data` string array, or `children` leaf ids | content is reconstructed into a full note body | sync and read behavior break if content moves to a new encoding |
+| unsupported encrypted or obfuscated shapes | obfuscated ids without usable `path`, or encrypted path markers | skipped for sync or rejected for writeback | users may think vaults are healthy when protocol support is actually incomplete |
+
+## Cognee compatibility matrix
+
+| Surface | Request or shape | Current expectation | Compatibility risk |
+| --- | --- | --- | --- |
+| auth login | `POST /api/v1/auth/login` | optional username/password login returns `access_token` or `token` | password-based Cognee auth breaks if login endpoint or token fields change |
+| dataset lookup | `GET /api/v1/datasets` | returns an array of `{ id, name }` entries | dataset-name resolution breaks if list shape or endpoint changes |
+| search | `POST /api/v1/search` | accepts one of several request body shapes and returns results through `results`, `data`, or `search_results` envelopes | retrieval breaks if all accepted search body or response shapes drift |
+| add | `POST /api/v1/add` | accepts multipart form upload with `data`, `datasetId` or `datasetName`, and repeated `node_set` values | snapshot ingestion breaks if upload field names or multipart handling change |
+| cognify | `POST /api/v1/cognify` | accepts `{ dataset_ids }` or `{ datasets }` JSON payloads | inline post-add enrichment breaks if dataset selector schema changes |
+| memify | `POST /api/v1/memify` | accepts `{ dataset_id }` or `{ dataset_name }`, optionally with `node_name` | manual and automated memify runs break if selector or node-set field names change |
+| dataset delete | `DELETE /api/v1/datasets/{id}` | deletes a resolved dataset by id | purge behavior breaks if dataset deletion moves or requires a different selector |
+
+## Scope of what the plugin uses
+
+This plugin does not implement the full Obsidian LiveSync protocol.
+
+It currently relies on a narrow subset:
+
+- CouchDB `_changes` polling for incremental sync
+- direct document fetches for notes and chunk leaves
+- conflict inspection through `_conflicts` and `open_revs=all`
+- direct note writeback for supported plain-text documents
+- conflict cleanup through `_bulk_docs`
+- optional database compaction through `/_compact`
+
+For Cognee, it currently relies on a narrow subset too:
+
+- optional username/password login for bearer token acquisition
+- dataset listing for resolving a configured dataset name to a dataset id
+- search requests for retrieval and graph exploration
+- multipart add uploads for snapshot ingestion
+- cognify after sync ingestion when configured
+- memify for explicit dataset enrichment
+- dataset deletion during purge operations
+
+## Endpoint surface used by this plugin
+
+All requests are scoped to one configured database.
+
+### `GET /{db}/_changes?include_docs=true&limit=200&since=<seq>`
+
+Used for incremental sync polling.
+
+Expected behavior:
+
+- returns standard CouchDB `_changes` rows
+- includes `doc` payloads when `include_docs=true`
+- supports `since=0` for a forced full scan
+- returns `last_seq` for checkpointing
+
+Fields the plugin reads from each row:
+
+- `seq`
+- `id`
+- `deleted`
+- `doc`
+
+Relevant implementation entry point:
+
+- `fetchChanges()` in [src/controller.ts](../src/controller.ts)
+
+### `GET /{db}/{docId}`
+
+Used to fetch the current winning revision for a note document or a child leaf document.
+
+Used for:
+
+- direct note reads
+- chunk leaf reads when a note stores content through `children`
+- existence probes before writeback
+
+Expected note fields include:
+
+- `_id`
+- `_rev`
+- `path`
+- `type`
+- `datatype`
+- `data`
+- `children`
+- `ctime`
+- `mtime`
+- `size`
+- `deleted` or `_deleted`
+
+Expected leaf fields include:
+
+- `_id`
+- `_rev`
+- `type: "leaf"`
+- `data`
+- `_deleted`
+
+Relevant implementation entry points:
+
+- `fetchNoteContentByPath()` in [src/controller.ts](../src/controller.ts)
+- `loadNoteContent()` in [src/controller.ts](../src/controller.ts)
+- `tryGetDoc()` in [src/controller.ts](../src/controller.ts)
+
+### `GET /{db}/{docId}?conflicts=true`
+
+Used as a conflict probe for the current winning revision.
+
+Expected behavior:
+
+- returns the current winning revision document
+- includes `_conflicts` when conflicting leaf revisions exist
+
+Relevant implementation entry point:
+
+- `fetchConflictProbeByPath()` in [src/controller.ts](../src/controller.ts)
+
+### `GET /{db}/{docId}?open_revs=all`
+
+Used to fetch the full current conflict bundle.
+
+Expected behavior:
+
+- may return JSON
+- may return `multipart/mixed`
+- each part or array element should decode to an object like `{ ok: <doc> }` or `{ missing: <rev> }`
+
+The plugin explicitly supports both plain JSON and multipart responses. Multipart parsing assumptions are implemented in `fetchOpenRevisionBundle()` and `parseMultipartJsonParts()` in [src/controller.ts](../src/controller.ts).
+
+### `PUT /{db}/{docId}`
+
+Used for supported plain-text writeback and for writing a resolved conflict winner.
+
+The plugin currently writes note payloads in this shape:
+
+```json
+{
+  "_id": "daily/note.md",
+  "_rev": "optional-current-rev",
+  "path": "daily/note.md",
+  "type": "plain",
+  "datatype": "plain",
+  "data": ["note content with trailing newline\n"],
+  "mtime": 1740000000000,
+  "ctime": 1740000000000,
+  "size": 31,
+  "children": [],
+  "eden": {}
+}
+```
+
+Important limitations:
+
+- writeback only supports plain-text note documents
+- writeback is rejected when vault encryption or path obfuscation is enabled
+- writeback preserves `ctime` when an existing document is present
+
+Relevant implementation entry points:
+
+- `writeNote()` in [src/controller.ts](../src/controller.ts)
+- `resolveConflict()` in [src/controller.ts](../src/controller.ts)
+
+### `POST /{db}/_bulk_docs`
+
+Used to delete losing conflict revisions after conflict resolution or benign auto-resolution.
+
+The plugin sends docs shaped like:
+
+```json
+{
+  "docs": [
+    { "_id": "daily/note.md", "_deleted": true, "_rev": "2-deadbeef" }
+  ]
+}
+```
+
+Relevant implementation entry point:
+
+- `deleteConflictRevisions()` in [src/controller.ts](../src/controller.ts)
+
+### `POST /{db}/_compact`
+
+Used only for explicit compaction requests.
+
+Expected behavior:
+
+- accepts a POST body
+- returns a response with `ok: true` when the compaction request is accepted
+
+Relevant implementation entry point:
+
+- `compactVault()` in [src/controller.ts](../src/controller.ts)
+
+## Cognee API surface used by this plugin
+
+All Cognee requests are scoped to one configured base URL.
+
+### `POST /api/v1/auth/login`
+
+Used only when the Cognee target is configured with username and password instead of a static API key or bearer token.
+
+Expected behavior:
+
+- accepts `application/x-www-form-urlencoded`
+- returns either `access_token` or `token`
+
+Relevant implementation entry points:
+
+- `loginToCognee()` in [src/controller.ts](../src/controller.ts)
+- `buildCogneeHeaders()` in [src/controller.ts](../src/controller.ts)
+
+### `GET /api/v1/datasets`
+
+Used to resolve a configured dataset name to a dataset id.
+
+Expected behavior:
+
+- returns an array of objects with `id` and `name`
+- allows the plugin to find the current dataset by exact `name`
+
+Relevant implementation entry point:
+
+- `resolveCogneeDataset()` in [src/controller.ts](../src/controller.ts)
+
+### `POST /api/v1/search`
+
+Used for retrieval and explicit graph exploration.
+
+The plugin currently tolerates multiple request body schemas because Cognee search payloads have varied across integrations and versions. The controller retries with fallback bodies in this order:
+
+1. snake_case payload using `dataset_ids` or `datasets`, `query`, `search_type`, `top_k`, `only_context`, `verbose`
+2. camelCase payload using `datasetIds` or `datasets`, `queryText`, `searchType`, `max_tokens`, `onlyContext`
+3. alternate camelCase payload using `datasetIds` or `datasetNames`, `query`, `searchType`, `topK`, `onlyContext`
+
+The plugin also tolerates multiple response envelopes:
+
+- top-level array
+- `{ results: ... }`
+- `{ data: ... }`
+- `{ search_results: ... }`
+
+Each normalized result is treated as carrying `search_result`, with optional `dataset_id` and `dataset_name`.
+
+Relevant implementation entry points:
+
+- `runCogneeSearchRequest()` in [src/controller.ts](../src/controller.ts)
+- `buildCogneeSearchBodies()` in [src/controller.ts](../src/controller.ts)
+- `normalizeCogneeSearchResponse()` in [src/controller.ts](../src/controller.ts)
+- `unwrapCogneeSearchResponse()` in [src/controller.ts](../src/controller.ts)
+
+### `POST /api/v1/add`
+
+Used to upload synced snapshot markdown into Cognee.
+
+Expected behavior:
+
+- accepts multipart form data
+- requires a `data` file part
+- accepts either `datasetId` or `datasetName`
+- accepts repeated `node_set` values when a node set is configured
+
+Relevant implementation entry point:
+
+- `uploadSnapshotToCognee()` in [src/controller.ts](../src/controller.ts)
+
+### `POST /api/v1/cognify`
+
+Used after snapshot upload when vault-level `cognify` is enabled.
+
+Expected selector behavior:
+
+- accepts `{ dataset_ids: [id] }` when a dataset id is already known
+- otherwise accepts `{ datasets: [name] }`
+
+Relevant implementation entry point:
+
+- `runCogneeCognify()` in [src/controller.ts](../src/controller.ts)
+
+### `POST /api/v1/memify`
+
+Used for manual and automated memify runs.
+
+Expected selector behavior:
+
+- accepts `{ dataset_id: id }` when a dataset id is already known
+- otherwise accepts `{ dataset_name: name }`
+- optionally accepts `node_name` carrying the configured node set array
+
+Relevant implementation entry point:
+
+- `runCogneeMemify()` in [src/controller.ts](../src/controller.ts)
+
+### `DELETE /api/v1/datasets/{id}`
+
+Used only by purge operations that explicitly request Cognee dataset deletion.
+
+Relevant implementation entry point:
+
+- `purgeVaultData()` in [src/controller.ts](../src/controller.ts)
+
+## Note document shapes the plugin accepts
+
+The plugin currently treats a document as a note only when:
+
+- `type` is `plain` or `newnote`
+- `path` is a string
+
+Supported content representations:
+
+- `data` as a string
+- `data` as an array of strings
+- `children` as an array of leaf document ids, where each child document has `type: "leaf"` and string `data`
+
+If `children` are present, the plugin reconstructs note content by fetching each child id and concatenating the resulting `data` strings in order.
+
+Relevant implementation entry points:
+
+- `isNoteDoc()` in [src/controller.ts](../src/controller.ts)
+- `loadNoteContent()` in [src/controller.ts](../src/controller.ts)
+- `CouchNoteDoc` and `CouchLeafDoc` in [src/types.ts](../src/types.ts)
+
+## Unsupported or partially supported cases
+
+### Encrypted or obfuscated note shapes
+
+The plugin intentionally treats some LiveSync shapes as unsupported.
+
+Currently rejected or skipped cases include:
+
+- path-obfuscated note ids without a usable plain `path`
+- note paths starting with `/\\:`
+- writeback to vaults that use passphrase encryption or path obfuscation
+
+Relevant implementation entry point:
+
+- `isUnsupportedEncryptedDoc()` in [src/controller.ts](../src/controller.ts)
+
+### Deletion support
+
+For sync and reads, the plugin recognizes deletions through either `deleted` or `_deleted` on the note document.
+
+For conflict cleanup, the plugin issues `_deleted: true` documents through `_bulk_docs`.
+
+Resolving a conflict to a deleted revision is not supported yet.
+
+### Path-to-document id assumptions
+
+The plugin assumes LiveSync document ids are path-based unless path obfuscation is enabled.
+
+Current behavior:
+
+- without obfuscation, the document id is derived from the normalized note path
+- with obfuscation, the plugin computes `f:` ids from a SHA-256 hash of the hashed passphrase plus normalized path
+
+This behavior is implemented in `pathToDocumentId()` in [src/controller.ts](../src/controller.ts). If upstream LiveSync changes its id derivation rules, this plugin will need updating.
+
+## Operational expectations tied to protocol behavior
+
+The plugin also depends on these higher-level protocol expectations:
+
+- CouchDB conflict metadata is available through `_conflicts`
+- `open_revs=all` is sufficient to fetch current conflict candidates
+- one observed winning revision from `_changes` is enough to create one local snapshot
+- intermediate unseen revisions cannot be reconstructed later unless CouchDB exposes them through the current winning revision or conflict bundle paths the plugin already uses
+- Cognee search remains reachable through `/api/v1/search` with at least one of the body and response formats the plugin already retries or unwraps
+- Cognee dataset listing remains sufficient to resolve configured dataset names to ids when the plugin is not given a dataset id directly
+
+## Endpoint to feature mapping
+
+This table links external protocol calls to the plugin features that trigger them.
+
+| External call | Triggering feature |
+| --- | --- |
+| `GET /{db}/_changes?...` | `obsidian_vault_sync`, service startup sync, timer-driven sync, repair full resync |
+| `GET /{db}/{docId}` | `obsidian_vault_read`, sync note loading, writeback existence probe, chunk leaf loading |
+| `GET /{db}/{docId}?conflicts=true` | sync conflict detection, `obsidian_vault_conflicts`, `obsidian_vault_resolve_conflict` |
+| `GET /{db}/{docId}?open_revs=all` | conflict inspection and resolution |
+| `PUT /{db}/{docId}` | `obsidian_vault_write`, conflict resolution winner writeback |
+| `POST /{db}/_bulk_docs` | benign auto-resolution cleanup, manual conflict resolution cleanup |
+| `POST /{db}/_compact` | `openclaw obsidian-vault compact` |
+| `POST /api/v1/auth/login` | Cognee username/password authentication path |
+| `GET /api/v1/datasets` | Cognee dataset name resolution for search and purge |
+| `POST /api/v1/search` | injected retrieval, `obsidian_vault_deep_graph_search`, explicit Cognee memory queries |
+| `POST /api/v1/add` | inline sync ingestion of snapshots |
+| `POST /api/v1/cognify` | post-sync Cognify when enabled |
+| `POST /api/v1/memify` | `obsidian_vault_memify`, heartbeat-triggered memify, cron-triggered memify |
+| `DELETE /api/v1/datasets/{id}` | `openclaw obsidian-vault purge --cognee-dataset` |
+
+## How to maintain this page
+
+When upgrading the source baseline or changing protocol-facing code:
+
+1. inspect the local upstream source clones for Obsidian LiveSync and CouchDB
+2. record the new baseline revisions in this page
+3. verify the endpoint and document-shape assumptions against the implementation in [src/controller.ts](../src/controller.ts) and [src/types.ts](../src/types.ts)
+4. update this page if any request, response, or accepted note shape changes
+5. update tests for the affected protocol behavior
+
+This page is intentionally implementation-first. If any detail is unclear, document what the plugin code currently does rather than guessing from partial upstream examples.
