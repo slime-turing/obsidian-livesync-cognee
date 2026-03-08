@@ -18,6 +18,9 @@
     "type": "git",
     "url": "git+https://github.com/slime-turing/obsidian-livesync-cognee.git"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "files": [
     "README.md",
