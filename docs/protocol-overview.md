@@ -48,7 +48,7 @@ flowchart LR
     F --> G[Cognee dataset target]
     G --> H[Cognee add or search or memify or cognify]
 
-    B --> I[datasetNames[agentId] or fallback datasetName]
+    B --> I[datasetNames by agentId or fallback datasetName]
     I --> C
     I --> G
 ```
