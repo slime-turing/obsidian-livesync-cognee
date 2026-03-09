@@ -1,6 +1,6 @@
 {
   "name": "@slime-turing/obsidian-livesync-cognee",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "OpenClaw sync bridge for Obsidian LiveSync vaults and Cognee ingestion",
   "keywords": [
     "openclaw",
@@ -24,6 +24,7 @@
   "type": "module",
   "files": [
     "README.md",
+    "docs/config-reference.md",
     "LICENSE",
     "openclaw.plugin.json",
     "index.ts",

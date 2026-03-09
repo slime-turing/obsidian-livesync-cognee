@@ -44,6 +44,7 @@ The LiveSync-specific behavior in this plugin is based on the Obsidian LiveSync 
 - [Architecture](#architecture)
 - [Core concepts](#core-concepts)
 - [Configuration](#configuration)
+- [Full config reference](./docs/config-reference.md)
 - [Protocol compatibility](#protocol-compatibility)
 - [Runtime behavior](#runtime-behavior)
 - [Storage layout](#storage-layout)
@@ -79,11 +80,49 @@ Then enable `plugins.entries.obsidian-livesync-cognee` in the OpenClaw config.
 
 1. Install the plugin.
 2. Enable `plugins.entries.obsidian-livesync-cognee`.
-3. Configure at least one vault under `plugins.entries.obsidian-livesync-cognee.config.vaults`.
-4. If you already use `cognee-openclaw` as the memory slot, let this plugin inherit the shared Cognee endpoint and dataset mapping from that slot.
-5. Run `openclaw obsidian-vault status` to confirm the vault is visible.
-6. Run `openclaw obsidian-vault sync --vault <id>` to stage mirror files and snapshots.
-7. If needed, run `openclaw obsidian-vault memify --dataset-name <name>` to enrich the existing Cognee dataset.
+3. Copy the Obsidian LiveSync `setupUri` and its transport `setupUriPassphrase` from the upstream LiveSync setup flow.
+4. Map each OpenClaw agent id to a Cognee dataset name under `plugins.entries.cognee-openclaw.config.datasetNames`.
+5. Point each vault at the dataset it should sync into with `vaults[].cognee.datasetName`.
+6. Run `openclaw obsidian-vault status` to confirm the vault is visible.
+7. Run `openclaw obsidian-vault sync --vault <id>` to stage mirror files and snapshots.
+8. If needed, run `openclaw obsidian-vault memify --dataset-name <name>` to enrich the existing Cognee dataset.
+
+Most users only need these config fields:
+
+```yaml
+plugins:
+  slots:
+    memory: cognee-openclaw
+  entries:
+    cognee-openclaw:
+      enabled: true
+      config:
+        baseUrl: https://cognee.example.invalid
+        datasetName: shared-dataset
+        datasetNames:
+          agent_a: team-notes
+          agent_b: research-notes
+
+    obsidian-livesync-cognee:
+      enabled: true
+      config:
+        vaults:
+          - id: team-notes
+            setupUri: ${OBSIDIAN_LIVESYNC_SETUP_URI}
+            setupUriPassphrase: ${OBSIDIAN_LIVESYNC_SETUP_URI_PASSPHRASE}
+            cognee:
+              enabled: true
+              datasetName: team-notes
+```
+
+How that mapping works:
+
+- `setupUri` and `setupUriPassphrase` are the normal way to configure a LiveSync vault here. Most users should use them instead of manually copying CouchDB and vault encryption fields.
+- each key under `datasetNames` is an OpenClaw agent id
+- each value under `datasetNames` is the Cognee dataset name for that agent
+- `vaults[].cognee.datasetName` should match one of those dataset names, or the shared fallback `datasetName`
+
+With the example above, `agent_a` is linked to the `team-notes` dataset, and the `team-notes` vault syncs into that same dataset.
 
 For sandboxed agents, remember that normal agent tool allowlists are not enough by themselves. You must also allow the same tool names through the sandbox tool policy described below.
 
@@ -140,7 +179,11 @@ Use it for questions that depend on 3-5 hop relationships, indirect time reasoni
 
 The config lives under `plugins.entries.obsidian-livesync-cognee.config`.
 
+For the full option-by-option reference, including purpose, requiredness, allowed values, defaults, and example values for every supported field, see [docs/config-reference.md](./docs/config-reference.md).
+
 If OpenClaw already uses `cognee-openclaw` as the memory slot, this plugin can inherit the Cognee endpoint, auth, default dataset, and per-agent `datasetNames` mapping from `plugins.entries.cognee-openclaw.config`. In that case you only need a vault-level `cognee` block when you want to override the shared Cognee settings.
+
+For most setups, the only vault fields you need to start are `id`, `setupUri`, `setupUriPassphrase`, and `cognee.datasetName`.
 
 ```yaml
 plugins:
@@ -165,42 +208,9 @@ plugins:
           - id: team-notes
             setupUri: ${OBSIDIAN_LIVESYNC_SETUP_URI}
             setupUriPassphrase: ${OBSIDIAN_LIVESYNC_SETUP_URI_PASSPHRASE}
-            mode: read-only
-            syncMode: changes
-            pollIntervalSeconds: 120
-            requestTimeoutMs: 15000
-            includeGlobs:
-              - projects/**
-              - daily/**
-            excludeGlobs:
-              - attachments/**
-            autoResolveConflicts: true
-            notifications:
-              sessionKey: primary-session
-              onError: true
-              onConflict: true
-              wakeAgent: true
-              dedupeWindowSeconds: 300
-            automation:
-              memify:
-                enabled: true
-                triggers:
-                  - heartbeat
-                  - cron
-                minIntervalSeconds: 1800
-                allSnapshots: false
-                notifyOnStart: false
-                notifyOnSuccess: true
-                notifyOnFailure: true
             cognee:
               enabled: true
               datasetName: dataset-a
-              cognify: true
-              downloadHttpLinks: false
-              maxLinksPerNote: 3
-              maxLinkBytes: 16384
-              searchType: CHUNKS
-              searchTopK: 5
 ```
 
 In this mapping, each key under `datasetNames` is an OpenClaw agent id and each value is the Cognee dataset name that agent should use. A vault-level `cognee.datasetName` should match either one of those agent dataset names or the shared default `datasetName`.

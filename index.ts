@@ -7,7 +7,7 @@ import { ObsidianLivesyncCogneeController } from "./src/controller.js";
 import { createObsidianLivesyncCogneeTools, INTERNAL_DEEP_GRAPH_SEARCH_AGENT_ID_PARAM } from "./src/tools.js";
 
 const pluginId = "obsidian-livesync-cognee";
-const pluginVersion = "0.1.1";
+const pluginVersion = "0.1.2";
 const defaultTraceFilePath = "/tmp/obsidian-livesync-cognee-trace.jsonl";
 
 function normalizeTraceValue(value: unknown, depth = 0): unknown {

@@ -715,10 +715,11 @@ describe("obsidian-livesync-cognee controller", () => {
     expect(stats.notesUpserted).toBe(1);
 
     const externalCall = fetchCalls.find((call) => call.url === "https://example.com/reference");
+    const externalInit = externalCall?.init as RequestInit & { dispatcher?: unknown };
     expect(externalCall).toBeDefined();
-    expect(externalCall?.init?.dispatcher).toBeTruthy();
-    expect(externalCall?.init?.redirect).toBe("follow");
-    expect((externalCall?.init?.headers as Record<string, string>)?.["User-Agent"]).toContain("Mozilla/5.0");
+    expect(externalInit?.dispatcher).toBeTruthy();
+    expect(externalInit?.redirect).toBe("follow");
+    expect((externalInit?.headers as Record<string, string>)?.["User-Agent"]).toContain("Mozilla/5.0");
 
     const statePath = path.join(tempDir, "plugins", "obsidian-livesync-cognee", "state.json");
     const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { vaults: Record<string, { notes: Record<string, { lastSnapshotPath?: string }> }> };

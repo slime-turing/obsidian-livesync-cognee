@@ -2061,10 +2061,6 @@ export class ObsidianLivesyncCogneeController {
             `obsidian-livesync-cognee: skipped Cognee cognify for vault=${vault.id} because the target rejected oversized text: ${message}`,
           );
           return false;
-                  const activeNoteCount = Object.values(this.ensureVaultState(vaultId).notes).filter((note) => !note.deleted).length;
-                  this.logger.info(
-                    `obsidian-livesync-cognee: repair finished for ${vault.id}: activeNotes=${activeNoteCount} rebuildSnapshots=${Boolean(options.rebuildSnapshots)}`,
-                  );
         }
         lastError = error;
       }
