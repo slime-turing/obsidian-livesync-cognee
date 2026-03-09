@@ -1,9 +1,15 @@
-import { createDecipheriv, createHash, pbkdf2Sync } from "node:crypto";
+import { createDecipheriv, createHash, hkdfSync, pbkdf2Sync } from "node:crypto";
 
 const SETUP_URI_PREFIX = "obsidian://setuplivesync?settings=";
 const ENCRYPT_V2_PREFIX = "%";
+const ENCRYPT_EPHEMERAL_SALT_PREFIX = "%$";
 const ENCRYPT_V3_PREFIX = "%~";
 const LEGACY_V1_PREFIX = "[";
+const HKDF_IV_LENGTH = 12;
+const HKDF_SALT_LENGTH = 32;
+const PBKDF2_SALT_LENGTH = 32;
+const HKDF_PBKDF2_ITERATIONS = 310000;
+const AES_GCM_AUTH_TAG_LENGTH = 16;
 
 export type DecodedSetupUriConfig = {
   url: string;
@@ -124,6 +130,48 @@ function decodeSetupUriPayloadV2(encodedValue: string, passphrase: string): stri
   return decrypted.toString("utf8");
 }
 
+function decodeSetupUriPayloadEphemeralSalt(encodedValue: string, passphrase: string): string {
+  if (!encodedValue.startsWith(ENCRYPT_EPHEMERAL_SALT_PREFIX)) {
+    throw new Error("setupUri payload must use LiveSync HKDF ephemeral-salt encryption");
+  }
+
+  const encryptedBuffer = Buffer.from(encodedValue.slice(ENCRYPT_EPHEMERAL_SALT_PREFIX.length), "base64");
+  const minimumLength = PBKDF2_SALT_LENGTH + HKDF_IV_LENGTH + HKDF_SALT_LENGTH + AES_GCM_AUTH_TAG_LENGTH;
+  if (encryptedBuffer.length < minimumLength) {
+    throw new Error("setupUri payload is malformed");
+  }
+
+  const pbkdf2Salt = encryptedBuffer.subarray(0, PBKDF2_SALT_LENGTH);
+  const iv = encryptedBuffer.subarray(PBKDF2_SALT_LENGTH, PBKDF2_SALT_LENGTH + HKDF_IV_LENGTH);
+  const hkdfSalt = encryptedBuffer.subarray(
+    PBKDF2_SALT_LENGTH + HKDF_IV_LENGTH,
+    PBKDF2_SALT_LENGTH + HKDF_IV_LENGTH + HKDF_SALT_LENGTH,
+  );
+  const ciphertextWithTag = encryptedBuffer.subarray(PBKDF2_SALT_LENGTH + HKDF_IV_LENGTH + HKDF_SALT_LENGTH);
+  if (ciphertextWithTag.length <= AES_GCM_AUTH_TAG_LENGTH) {
+    throw new Error("setupUri ciphertext is truncated");
+  }
+
+  const masterKey = pbkdf2Sync(passphrase, pbkdf2Salt, HKDF_PBKDF2_ITERATIONS, 32, "sha256");
+  const chunkKey = Buffer.from(hkdfSync("sha256", masterKey, hkdfSalt, Buffer.alloc(0), 32));
+  const authTag = ciphertextWithTag.subarray(ciphertextWithTag.length - AES_GCM_AUTH_TAG_LENGTH);
+  const ciphertext = ciphertextWithTag.subarray(0, ciphertextWithTag.length - AES_GCM_AUTH_TAG_LENGTH);
+  const decipher = createDecipheriv("aes-256-gcm", chunkKey, iv);
+  decipher.setAuthTag(authTag);
+  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  return decrypted.toString("utf8");
+}
+
+function decodeSetupUriPayload(encodedValue: string, passphrase: string): string {
+  if (encodedValue.startsWith(ENCRYPT_EPHEMERAL_SALT_PREFIX)) {
+    return decodeSetupUriPayloadEphemeralSalt(encodedValue, passphrase);
+  }
+  if (encodedValue.startsWith(ENCRYPT_V3_PREFIX)) {
+    throw new Error("setupUri payload uses an unsupported LiveSync encryption version");
+  }
+  return decodeSetupUriPayloadV2(encodedValue, passphrase);
+}
+
 function normalizeSetupUriPayload(rawValue: string): string {
   if (/%25|%2b|%2f|%3d/i.test(rawValue)) {
     return decodeURIComponent(rawValue);
@@ -146,7 +194,7 @@ export function decodeSetupUri(setupUri: string, setupUriPassphrase: string): De
 
   let payload: SetupUriPayload;
   try {
-    payload = JSON.parse(decodeSetupUriPayloadV2(encodedPayload, setupUriPassphrase)) as SetupUriPayload;
+    payload = JSON.parse(decodeSetupUriPayload(encodedPayload, setupUriPassphrase)) as SetupUriPayload;
   } catch (error) {
     throw new Error(
       `failed to decode setupUri: ${error instanceof Error ? error.message : String(error)}`,

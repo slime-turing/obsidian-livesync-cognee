@@ -1,4 +1,4 @@
-import { createCipheriv, createHash, pbkdf2Sync } from "node:crypto";
+import { createCipheriv, createHash, hkdfSync, pbkdf2Sync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { resolvePluginConfig } from "./config.js";
 
@@ -13,6 +13,18 @@ function createSetupUriPayloadV2(input: string, passphrase: string): string {
   const ciphertext = Buffer.concat([cipher.update(input, "utf8"), cipher.final()]);
   const authTag = cipher.getAuthTag();
   return `%${iv.toString("hex")}${salt.toString("hex")}${Buffer.concat([ciphertext, authTag]).toString("base64")}`;
+}
+
+function createSetupUriPayloadEphemeralSalt(input: string, passphrase: string): string {
+  const pbkdf2Salt = Buffer.from("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", "hex");
+  const iv = Buffer.from("00112233445566778899aabb", "hex");
+  const hkdfSalt = Buffer.from("ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100", "hex");
+  const masterKey = pbkdf2Sync(passphrase, pbkdf2Salt, 310000, 32, "sha256");
+  const chunkKey = Buffer.from(hkdfSync("sha256", masterKey, hkdfSalt, Buffer.alloc(0), 32));
+  const cipher = createCipheriv("aes-256-gcm", chunkKey, iv);
+  const ciphertext = Buffer.concat([cipher.update(input, "utf8"), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return `%$${Buffer.concat([pbkdf2Salt, iv, hkdfSalt, ciphertext, authTag]).toString("base64")}`;
 }
 
 function createSetupUri(payload: Record<string, unknown>, passphrase: string): string {
@@ -146,6 +158,45 @@ describe("obsidian-livesync-cognee config", () => {
       encrypt: true,
       passphrase: "vault-passphrase",
       usePathObfuscation: true,
+    });
+  });
+
+  it("accepts setupUri payloads exported with ephemeral PBKDF2 salt", () => {
+    const setupUriPassphrase = "icy-fire";
+    const decodedPayload = createSetupUriPayloadEphemeralSalt(
+      JSON.stringify({
+        couchDB_URI: "https://couchdb.example.invalid",
+        couchDB_DBNAME: "memo-db",
+        couchDB_USER: "memo-user",
+        couchDB_PASSWORD: "memo-password",
+        encrypt: true,
+        passphrase: "vault-passphrase",
+        usePathObfuscation: true,
+        handleFilenameCaseSensitive: false,
+      }),
+      setupUriPassphrase,
+    );
+
+    const config = resolvePluginConfig({
+      vaults: [
+        {
+          id: "memo",
+          setupUri: `${SETUP_URI_PREFIX}${encodeURIComponent(decodedPayload)}`,
+          setupUriPassphrase,
+        },
+      ],
+    });
+
+    expect(config.vaults[0]).toMatchObject({
+      id: "memo",
+      url: "https://couchdb.example.invalid",
+      database: "memo-db",
+      username: "memo-user",
+      password: "memo-password",
+      encrypt: true,
+      passphrase: "vault-passphrase",
+      usePathObfuscation: true,
+      handleFilenameCaseSensitive: false,
     });
   });
 

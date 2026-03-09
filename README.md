@@ -204,6 +204,31 @@ plugins:
 
 In this mapping, each key under `datasetNames` is an OpenClaw agent id and each value is the Cognee dataset name that agent should use. A vault-level `cognee.datasetName` should match either one of those agent dataset names or the shared default `datasetName`.
 
+When you configure an encrypted LiveSync vault, keep the copied setup URI and its transport passphrase out of tracked files. Prefer environment expansion or your secret manager, and commit only placeholder variable names such as `OBSIDIAN_LIVESYNC_SETUP_URI` and `OBSIDIAN_LIVESYNC_SETUP_URI_PASSPHRASE`.
+
+Example using shell environment variables:
+
+```bash
+export OBSIDIAN_LIVESYNC_SETUP_URI='obsidian://setuplivesync?settings=<copied-from-livesync>'
+export OBSIDIAN_LIVESYNC_SETUP_URI_PASSPHRASE='<copied-separately>'
+openclaw obsidian-vault status
+```
+
+Example using a redacted tracked config snippet:
+
+```yaml
+plugins:
+  entries:
+    obsidian-livesync-cognee:
+      enabled: true
+      config:
+        vaults:
+          - id: team-notes
+            setupUri: ${OBSIDIAN_LIVESYNC_SETUP_URI}
+            setupUriPassphrase: ${OBSIDIAN_LIVESYNC_SETUP_URI_PASSPHRASE}
+            mode: read-only
+```
+
 If you want `includeGlobs` to allow every synced note path at any folder depth, use `**`:
 
 ```yaml
@@ -471,6 +496,8 @@ The repair path:
 
 Encrypted LiveSync vaults should be configured with `setupUri` and `setupUriPassphrase` so the CouchDB and E2EE settings stay bundled exactly as upstream generated them.
 
+The plugin accepts both the older fixed-salt LiveSync setup URI payloads and the newer `%$` payloads produced by current Obsidian LiveSync setup flows, including values copied from the mobile UI's `Setup` -> `To setup other devices` -> `Copy the current settings to a setup URI` action.
+
 Writeback is not attempted when LiveSync passphrase encryption or path obfuscation is enabled. Supported encrypted read shapes are mirrored locally, and unsupported encrypted shapes are skipped and reported.
 
 ### Non-plain note encodings
@@ -514,10 +541,10 @@ For setup-URI based encrypted vaults, generate the URI with the upstream helper:
 ```bash
 export hostname=https://couchdb.example.net
 export database=obsidian-team-notes
-export username=obsidian_user
-export password=super-secret
-export passphrase=vault-e2ee-passphrase
-export uri_passphrase=typed-separately
+export username="$EXAMPLE_COUCHDB_USER"
+export password="$EXAMPLE_COUCHDB_PASSWORD"
+export passphrase="$EXAMPLE_LIVESYNC_PASSPHRASE"
+export uri_passphrase="$EXAMPLE_SETUP_URI_PASSPHRASE"
 deno run -A https://raw.githubusercontent.com/vrtmrz/obsidian-livesync/main/utils/flyio/generate_setupuri.ts
 ```
 
@@ -535,6 +562,12 @@ plugins:
             setupUriPassphrase: ${OBSIDIAN_LIVESYNC_SETUP_URI_PASSPHRASE}
             mode: read-only
 ```
+
+Best practice for issue reports and commits:
+
+- do not paste a raw `setupUri` into tracked config, screenshots, logs, issues, or commit messages
+- do not commit a real `setupUriPassphrase`, CouchDB password, Cognee token, or local OpenClaw config
+- if you need to share a reproducer, replace values with placeholders and keep only the field names and shape
 
 Before reporting sync bugs, compare your LiveSync, CouchDB, and Cognee versions against [docs/protocol-compatibility.md](./docs/protocol-compatibility.md) so protocol drift is visible up front.
 
