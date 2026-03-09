@@ -111,6 +111,44 @@ describe("obsidian-livesync-cognee config", () => {
     ).toThrow("vaults[0] cannot set database, username, password when setupUri is used");
   });
 
+  it("accepts setupUri payloads that are already URI-decoded once", () => {
+    const setupUriPassphrase = "patient-haze";
+    const decodedPayload = createSetupUriPayloadV2(
+      JSON.stringify({
+        couchDB_URI: "https://couchdb.example.invalid",
+        couchDB_DBNAME: "vault-a-db",
+        couchDB_USER: "user-a",
+        couchDB_PASSWORD: "password-a",
+        encrypt: true,
+        passphrase: "vault-passphrase",
+        usePathObfuscation: true,
+        handleFilenameCaseSensitive: false,
+      }),
+      setupUriPassphrase,
+    );
+
+    const config = resolvePluginConfig({
+      vaults: [
+        {
+          id: "vault-a",
+          setupUri: `${SETUP_URI_PREFIX}${decodedPayload}`,
+          setupUriPassphrase,
+        },
+      ],
+    });
+
+    expect(config.vaults[0]).toMatchObject({
+      id: "vault-a",
+      url: "https://couchdb.example.invalid",
+      database: "vault-a-db",
+      username: "user-a",
+      password: "password-a",
+      encrypt: true,
+      passphrase: "vault-passphrase",
+      usePathObfuscation: true,
+    });
+  });
+
   it("parses notifications and search settings", () => {
     const config = resolvePluginConfig({
       vaults: [

@@ -124,6 +124,13 @@ function decodeSetupUriPayloadV2(encodedValue: string, passphrase: string): stri
   return decrypted.toString("utf8");
 }
 
+function normalizeSetupUriPayload(rawValue: string): string {
+  if (/%25|%2b|%2f|%3d/i.test(rawValue)) {
+    return decodeURIComponent(rawValue);
+  }
+  return rawValue;
+}
+
 export function decodeSetupUri(setupUri: string, setupUriPassphrase: string): DecodedSetupUriConfig {
   if (!setupUri.startsWith(SETUP_URI_PREFIX)) {
     throw new Error("setupUri must start with obsidian://setuplivesync?settings=");
@@ -132,7 +139,7 @@ export function decodeSetupUri(setupUri: string, setupUriPassphrase: string): De
     throw new Error("setupUriPassphrase is required");
   }
 
-  const encodedPayload = decodeURIComponent(setupUri.slice(SETUP_URI_PREFIX.length));
+  const encodedPayload = normalizeSetupUriPayload(setupUri.slice(SETUP_URI_PREFIX.length));
   if (encodedPayload.startsWith(LEGACY_V1_PREFIX)) {
     throw new Error("legacy setupUri payloads are not supported by this plugin yet");
   }
