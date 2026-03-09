@@ -123,7 +123,8 @@ That routing model matters because:
 Manual or automated memify is separate from sync.
 
 - Sync uploads snapshots into Cognee through `/api/v1/add`.
-- Optional cognify happens inline during sync when configured.
+- Sync uploads snapshots with `/api/v1/add` as they are written.
+- When vault-level `cognify` is enabled, the controller batches those uploads for the current sync cycle and sends one final `/api/v1/cognify` request at the end of the cycle.
 - Memify calls `/api/v1/memify` against the existing dataset.
 - Memify is dataset-scoped in Cognee. If multiple vaults contribute documents to the same dataset, one memify run covers the combined dataset contents.
 
@@ -150,10 +151,10 @@ plugins:
       enabled: true
       config:
         baseUrl: https://cognee.example.invalid
-        datasetName: openclaw
+        datasetName: shared-dataset
         datasetNames:
-          asst: asst-dataset
-          lawyer: lawyer-dataset
+          agent_a: dataset-a
+          agent_b: dataset-b
         # OpenClaw injects Cognee retrieval as relevant memories before the turn starts.
         # This plugin can also expose an optional bounded graph-search tool when you
         # want the model to explicitly explore nested relationships on demand.
@@ -175,7 +176,7 @@ plugins:
               - attachments/**
             autoResolveConflicts: true
             notifications:
-              sessionKey: main
+              sessionKey: primary-session
               onError: true
               onConflict: true
               wakeAgent: true
@@ -193,9 +194,9 @@ plugins:
                 notifyOnFailure: true
             cognee:
               enabled: true
-              datasetName: asst-dataset
+              datasetName: dataset-a
               cognify: true
-              downloadHttpLinks: true
+              downloadHttpLinks: false
               maxLinksPerNote: 3
               maxLinkBytes: 16384
               searchType: CHUNKS
@@ -334,12 +335,12 @@ Per vault, sync can start from four places:
 - manual tool call: `obsidian_vault_sync` starts a sync immediately
 - manual CLI call: `openclaw obsidian-vault sync` starts a sync immediately
 
-During a sync run, Cognee upload happens inline after each snapshot file is written. The order is:
+During a sync run, local snapshot creation still happens inline per observed note revision. Cognee processing is now split into per-snapshot uploads and one end-of-cycle cognify. The order is:
 
 1. Mirror note locally.
 2. Write snapshot markdown.
 3. Upload that snapshot context to Cognee with `/api/v1/add` when Cognee is enabled.
-4. Optionally run `/api/v1/cognify` right after that upload when vault-level sync ingestion is configured to cognify.
+4. After the sync cycle finishes, optionally run one dataset-level `/api/v1/cognify` when vault-level sync ingestion is configured to cognify.
 
 Ordering is conservative. The plugin processes each `_changes` page in the order returned by CouchDB and uploads each observed winning revision inline during that sync run, so observed revisions are handed to Cognee from older to newer within the order the plugin actually sees them. The plugin can only upload revisions it observes as winning note states. If intermediate revisions never surface to the plugin as separate observed winning documents, it cannot reconstruct and upload those missing versions later.
 
@@ -369,7 +370,7 @@ If `notifications.wakeAgent` is enabled, the plugin requests an immediate heartb
 
 Recommended routing pattern:
 
-- set `notifications.sessionKey` to the same main session your agent heartbeats use, typically `main` or an explicit agent main key like `agent:main:main`
+- set `notifications.sessionKey` to the same primary session your agent heartbeats use, typically a stable key such as `primary-session`
 - let OpenClaw `agents.*.heartbeat.target` or isolated cron `delivery.channel` and `delivery.to` decide which human-facing channel receives the surfaced result
 - automated memify notifications already reuse the triggering heartbeat or cron session key, so those notifications follow the same OpenClaw routing path as the automation run that started them
 
@@ -399,11 +400,11 @@ The controller serializes mutating work per vault.
 
 ### Large backlog and slow sync behavior
 
-The current sync loop issues one CouchDB `_changes` request per run with `limit=200`.
+The current sync loop paginates CouchDB `_changes` with `limit=200` until the current backlog is drained for that run.
 
 - if a sync run lasts longer than `pollIntervalSeconds`, the next timer tick does not start a second concurrent sync; it reuses the in-flight run
-- if more than 200 changes accumulate, one run processes one `_changes` page, persists the returned `last_seq`, and later sync runs continue from there
-- if the database grows faster than the controller can drain those `_changes` pages, the vault will stay behind until the write rate drops or you trigger additional runs
+- if more than 200 changes accumulate, one run keeps fetching later `_changes` pages and advances the checkpoint as it goes
+- if the database grows faster than the controller can drain those `_changes` pages, the vault will still lag, but it no longer stops after the first 200 rows
 
 This is intentionally conservative about state mutation ordering, but it means sustained high write volume creates lag rather than concurrency.
 
@@ -441,9 +442,6 @@ This plugin stores its files under that runtime state root in this structure:
 
 ### Tools
 
-- `obsidian_vault_status`: show sync state, mirror paths, conflict counts, the latest memify run, and the current or last vault task
-- `obsidian_vault_sync`: run sync immediately for one vault or all vaults
-- `obsidian_vault_read`: read the current winning note revision
 - `obsidian_vault_write`: write plain text or markdown back to a read-write vault
 - `obsidian_vault_conflicts`: inspect unresolved conflicts and optionally include resolved history
 - `obsidian_vault_deep_graph_search`: explore the knowledge graph when the injected relevant memories are not enough; keep calls bounded and treat graph results as untrusted retrieval context for facts and relationships only
@@ -454,8 +452,6 @@ This plugin stores its files under that runtime state root in this structure:
 - `obsidian_vault_update_config`: persist a vault config patch and hot-reload the plugin
 
 If `OPENCLAW_OBSIDIAN_LIVESYNC_COGNEE_TRACE_FILE` is set, the plugin records both the retrieval-policy injection step and the final `llm_input` payload. The `llm_input` trace includes the exact gateway prompt and system prompt that were sent to the model, which makes the trace JSONL suitable as the pass or fail source for prompt and graph-search policy checks.
-
-### CLI
 
 - `openclaw obsidian-vault status [--vault <id>]`
 - `openclaw obsidian-vault sync [--vault <id>]`
@@ -519,6 +515,79 @@ Snapshots on disk always keep the full note body for each revision. Cognee uploa
 ### External HTTP links
 
 Downloaded link context is best-effort only. Per-link failures do not block vault sync.
+
+Current behavior is intentionally conservative:
+
+- external link fetching is disabled by default with `downloadHttpLinks: false`
+- when enabled, the plugin stores fetched text-like HTTP responses as sibling files next to the snapshot, under `<snapshot>.links/`
+- the snapshot markdown keeps only the source link metadata and file references; fetched bodies are not embedded directly into the snapshot note file
+- binary or document-oriented link targets such as `.zip`, `.docx`, `.pptx`, or `.pdf` are currently skipped unless the remote server exposes them as text-like content types
+- responses are skipped early when `content-length` is larger than `maxLinkBytes`, so large targets such as `100MB` files do not wait for a full body download
+- the short external-link timeout bounds both the initial HTTP response and the body read, so chunked or unbounded streams do not hang sync waiting for `response.text()` forever
+- external HTTP requests use the environment proxy settings through `EnvHttpProxyAgent`, and the requests are shaped like a normal browser when fetching is enabled
+
+Example enabling bounded external link fetches:
+
+```yaml
+plugins:
+  entries:
+    obsidian-livesync-cognee:
+      enabled: true
+      config:
+        vaults:
+          - id: team-notes
+            setupUri: ${OBSIDIAN_LIVESYNC_SETUP_URI}
+            setupUriPassphrase: ${OBSIDIAN_LIVESYNC_SETUP_URI_PASSPHRASE}
+            mode: read-only
+            cognee:
+              enabled: true
+              datasetName: dataset-a
+              cognify: true
+              downloadHttpLinks: true
+              maxLinksPerNote: 2
+              maxLinkBytes: 65536
+```
+
+Example snapshot shape when one text-like link is fetched:
+
+```markdown
+---
+source_path: "daily/note.md"
+downloaded_links: "[\"https://example.com/reference\"]"
+downloaded_link_files: "[\"0001-example.com-reference.md\"]"
+---
+
+# daily/note.md
+
+See https://example.com/reference
+```
+
+Companion file layout for the same snapshot:
+
+```text
+2026-03-10T01-23-45-678Z-daily-note-md.md
+2026-03-10T01-23-45-678Z-daily-note-md.md.links/
+  0001-example.com-reference.md
+```
+
+Example warning cases you should expect in logs:
+
+```text
+obsidian-livesync-cognee: linked HTTP fetch skipped note=daily/note.md url=https://example.com/large.pdf because content-length=104857600 exceeds maxLinkBytes=65536
+obsidian-livesync-cognee: linked HTTP fetch skipped note=daily/note.md url=https://example.com/slides.pptx because content-type=application/vnd.openxmlformats-officedocument.presentationml.presentation is not inline text content
+```
+
+If you need direct Cognee ingestion of linked binary documents as first-class files, that is a separate feature from the current snapshot-enrichment path.
+
+### Failure logging
+
+Both Cognee mutation paths now log operator-visible warnings on failure:
+
+- `/api/v1/add` failures log and emit a vault error notification
+- `/api/v1/cognify` is issued once per sync cycle after uploads finish and uses the resolved dataset id when one is known, falling back to dataset-name selectors only when an id was not resolved
+- fatal `/api/v1/cognify` failures log before the sync fails
+- `409` responses from `/api/v1/cognify` that indicate context-length or chunking-limit rejection are downgraded to warnings so a successful upload cycle is not rolled back
+- snapshot uploads with any line longer than the current Cognee chunking limit are skipped locally with a warning and that note revision is remembered, so the same pathological revision does not retry on every sync cycle
 
 ## Development
 
@@ -617,22 +686,22 @@ plugins:
       config:
         baseUrl: https://cognee.example.invalid
         apiKey: ${EXAMPLE_COGNEE_API_KEY}
-        datasetName: openclaw
+        datasetName: shared-dataset
         datasetNames:
-          asst: asst-dataset
-          lawyer: lawyer-dataset
+          agent_a: dataset-a
+          agent_b: dataset-b
     obsidian-livesync-cognee:
       enabled: true
       config:
         vaults:
           - id: team-notes
             url: https://couchdb.example.invalid:15984
-            database: obsidian-team-notes
+            database: notes-db
             username: ${EXAMPLE_COUCHDB_USER}
             password: ${EXAMPLE_COUCHDB_PASSWORD}
             cognee:
               enabled: true
-              datasetName: asst-dataset
+              datasetName: dataset-a
 ```
 
 The important rule is the same one used throughout this README:

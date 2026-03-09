@@ -114,7 +114,7 @@
           "authTokenEnv": { "type": "string" },
           "nodeSet": { "type": "array", "items": { "type": "string" } },
           "cognify": { "type": "boolean", "default": true },
-          "downloadHttpLinks": { "type": "boolean", "default": true },
+          "downloadHttpLinks": { "type": "boolean", "default": false },
           "maxLinksPerNote": { "type": "number", "minimum": 0, "default": 5 },
           "maxLinkBytes": { "type": "number", "minimum": 1024, "default": 262144 },
           "searchType": { "type": "string", "enum": ["CHUNKS", "GRAPH_COMPLETION"], "default": "CHUNKS" },

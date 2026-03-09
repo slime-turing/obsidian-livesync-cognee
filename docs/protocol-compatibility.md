@@ -78,7 +78,7 @@ If upstream documentation and this page ever diverge, the plugin code is the imm
 | dataset lookup | `GET /api/v1/datasets` | returns an array of `{ id, name }` entries | dataset-name resolution breaks if list shape or endpoint changes |
 | search | `POST /api/v1/search` | accepts one of several request body shapes and returns results through `results`, `data`, or `search_results` envelopes | retrieval breaks if all accepted search body or response shapes drift |
 | add | `POST /api/v1/add` | accepts multipart form upload with `data`, `datasetId` or `datasetName`, and repeated `node_set` values | snapshot ingestion breaks if upload field names or multipart handling change |
-| cognify | `POST /api/v1/cognify` | accepts `{ dataset_ids }` or `{ datasets }` JSON payloads | inline post-add enrichment breaks if dataset selector schema changes |
+| cognify | `POST /api/v1/cognify` | accepts dataset-scoped JSON payloads such as `{ datasetIds }`, `{ dataset_ids }`, `{ datasetNames }`, or `{ datasets }` | post-sync enrichment breaks if dataset selector schema changes |
 | memify | `POST /api/v1/memify` | accepts `{ dataset_id }` or `{ dataset_name }`, optionally with `node_name` | manual and automated memify runs break if selector or node-set field names change |
 | dataset delete | `DELETE /api/v1/datasets/{id}` | deletes a resolved dataset by id | purge behavior breaks if dataset deletion moves or requires a different selector |
 
@@ -101,7 +101,7 @@ For Cognee, it currently relies on a narrow subset too:
 - dataset listing for resolving a configured dataset name to a dataset id
 - search requests for retrieval and graph exploration
 - multipart add uploads for snapshot ingestion
-- cognify after sync ingestion when configured
+- one final cognify after sync ingestion when configured
 - memify for explicit dataset enrichment
 - dataset deletion during purge operations
 
@@ -334,12 +334,13 @@ Relevant implementation entry point:
 
 ### `POST /api/v1/cognify`
 
-Used after snapshot upload when vault-level `cognify` is enabled.
+Used after the sync cycle finishes when vault-level `cognify` is enabled.
 
 Expected selector behavior:
 
-- accepts `{ dataset_ids: [id] }` when a dataset id is already known
-- otherwise accepts `{ datasets: [name] }`
+- prefers `{ datasetIds: [id] }` when a dataset id is already known
+- retries with `{ dataset_ids: [id] }` for compatibility
+- otherwise prefers `{ datasetNames: [name] }` and retries with `{ datasets: [name] }`
 
 Relevant implementation entry point:
 
@@ -439,6 +440,7 @@ The plugin also depends on these higher-level protocol expectations:
 - CouchDB conflict metadata is available through `_conflicts`
 - `open_revs=all` is sufficient to fetch current conflict candidates
 - one observed winning revision from `_changes` is enough to create one local snapshot
+- `_changes` pagination continues past the first `limit=200` page until the current backlog for that run is drained
 - intermediate unseen revisions cannot be reconstructed later unless CouchDB exposes them through the current winning revision or conflict bundle paths the plugin already uses
 - Cognee search remains reachable through `/api/v1/search` with at least one of the body and response formats the plugin already retries or unwraps
 - Cognee dataset listing remains sufficient to resolve configured dataset names to ids when the plugin is not given a dataset id directly
@@ -460,7 +462,7 @@ This table links external protocol calls to the plugin features that trigger the
 | `GET /api/v1/datasets` | Cognee dataset name resolution for search and purge |
 | `POST /api/v1/search` | injected retrieval, `obsidian_vault_deep_graph_search`, explicit Cognee memory queries |
 | `POST /api/v1/add` | inline sync ingestion of snapshots |
-| `POST /api/v1/cognify` | post-sync Cognify when enabled |
+| `POST /api/v1/cognify` | one final post-sync Cognify when enabled |
 | `POST /api/v1/memify` | `obsidian_vault_memify`, heartbeat-triggered memify, cron-triggered memify |
 | `DELETE /api/v1/datasets/{id}` | `openclaw obsidian-vault purge --cognee-dataset` |
 

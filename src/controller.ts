@@ -6,6 +6,7 @@ import {
   decrypt as decryptHkdf,
   decryptWithEphemeralSalt,
 } from "octagonal-wheels/encryption/hkdf";
+import { EnvHttpProxyAgent } from "undici";
 import type { PluginLogger } from "openclaw/plugin-sdk";
 import type {
   CogneeMemoryResult,
@@ -40,10 +41,16 @@ const PLUGIN_DIR = path.join("plugins", "obsidian-livesync-cognee");
 const AUTOMATION_TRIGGER_GRACE_MS = 1000;
 const COGNEE_MUTATION_TIMEOUT_MS = 60_000;
 const COGNEE_MEMIFY_TIMEOUT_MS = 1_000;
+const COGNEE_MAX_UPLOAD_LINE_LENGTH = 8191;
+const CHANGES_PAGE_LIMIT = 200;
+const EXTERNAL_HTTP_FETCH_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
+const EXTERNAL_LINK_FETCH_TIMEOUT_MS = 15_000;
 const ENCRYPTED_META_PREFIX = "/\\:";
 const EDEN_ENCRYPTED_KEY = "h:++encrypted";
 const EDEN_ENCRYPTED_KEY_HKDF = "h:++encrypted-hkdf";
 const SYNC_PARAMETERS_DOC_ID = "_local/obsidian_livesync_sync_parameters";
+
+let externalHttpProxyAgent: EnvHttpProxyAgent | undefined;
 
 type ControllerNotifyParams = {
   sessionKey: string;
@@ -77,6 +84,23 @@ type CogneeMemifyRunResult = {
   status?: string;
   pipelineRunId?: string;
   checkHint?: string;
+};
+
+type CogneeUploadResult = {
+  uploaded: boolean;
+  datasetId?: string;
+};
+
+type CogneeUploadPayload = {
+  fileName: string;
+  content: string;
+};
+
+type SnapshotLinkedContentFile = {
+  fileName: string;
+  url: string;
+  contentType: string;
+  content: string;
 };
 
 type OpenRevisionEntry = {
@@ -162,6 +186,19 @@ function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function getExternalFetchDispatcher(): EnvHttpProxyAgent | undefined {
+  if (!(
+    process.env.https_proxy
+    || process.env.HTTPS_PROXY
+    || process.env.http_proxy
+    || process.env.HTTP_PROXY
+  )) {
+    return undefined;
+  }
+  externalHttpProxyAgent ??= new EnvHttpProxyAgent();
+  return externalHttpProxyAgent;
+}
+
 /**
  * LiveSync ids are path-based unless path obfuscation is enabled. Matching that
  * rule lets this plugin address the same document ids as the Obsidian client.
@@ -217,6 +254,62 @@ function stripHtml(input: string): string {
     .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function buildLinkedContentFileName(index: number, sourceUrl: string): string {
+  try {
+    const parsed = new URL(sourceUrl);
+    const host = sanitizeSegment(parsed.hostname || "link");
+    const tail = sanitizeSegment(parsed.pathname.split("/").filter(Boolean).pop() || "content");
+    return `${String(index + 1).padStart(4, "0")}-${host}-${tail}.md`;
+  } catch {
+    return `${String(index + 1).padStart(4, "0")}-${sanitizeSegment(sourceUrl)}.md`;
+  }
+}
+
+function buildLinkedContentDocument(
+  notePath: string,
+  linked: { url: string; contentType: string; content: string },
+): string {
+  return ensureTrailingNewline([
+    "---",
+    `source_note: ${escapeFrontmatterScalar(notePath)}`,
+    `source_url: ${escapeFrontmatterScalar(linked.url)}`,
+    `content_type: ${escapeFrontmatterScalar(linked.contentType)}`,
+    `captured_at: ${escapeFrontmatterScalar(new Date().toISOString())}`,
+    "---",
+    "",
+    linked.content,
+  ].join("\n"));
+}
+
+function parseContentLength(value: string | null): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return undefined;
+  }
+  return parsed;
+}
+
+function isInlineTextContentType(contentType: string): boolean {
+  const normalized = contentType.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+  if (!normalized) {
+    return false;
+  }
+  if (normalized.startsWith("text/")) {
+    return true;
+  }
+  return [
+    "application/json",
+    "application/xml",
+    "application/xhtml+xml",
+    "application/javascript",
+    "application/x-javascript",
+    "image/svg+xml",
+  ].includes(normalized) || normalized.endsWith("+json") || normalized.endsWith("+xml");
 }
 
 function extractLinks(content: string): Array<{ url: string; kind: "http" | "relative" | "wiki" }> {
@@ -285,6 +378,16 @@ function summarizeConflictContent(content: string | null, deleted: boolean): str
 
 function normalizeConflictComparableContent(content: string | null, deleted: boolean): string {
   return `${deleted ? "deleted" : "active"}:${(content ?? "").replace(/\r\n/g, "\n").trim()}`;
+}
+
+function findLongestLineLength(value: string): number {
+  let longest = 0;
+  for (const line of value.split(/\r?\n/)) {
+    if (line.length > longest) {
+      longest = line.length;
+    }
+  }
+  return longest;
 }
 
 function buildDiffPreview(baseContent: string | null, nextContent: string | null): string | undefined {
@@ -601,7 +704,7 @@ export class ObsidianLivesyncCogneeController {
     await this.initialise();
     const vault = this.requireVault(vaultId);
     const runtime = this.ensureVaultState(vaultId);
-    const content = await this.fetchNoteContentByPath(vault, notePath);
+    const content = await this.fetchNoteContentByPath(vault, notePath, runtime.notes[notePath]?.docId);
     const mirrorPath = this.resolveMirrorPath(vault, notePath);
     const links = extractLinks(content.content);
     return {
@@ -676,7 +779,11 @@ export class ObsidianLivesyncCogneeController {
     return this.runExclusive(vaultId, async () => {
       const vault = this.requireVault(vaultId);
       this.assertVaultWritebackCompatible(vault, vaultId);
-      const currentDoc = await this.fetchConflictProbeByPath(vault, notePath);
+      const currentDoc = await this.fetchConflictProbeByPath(
+        vault,
+        notePath,
+        this.ensureVaultState(vaultId).notes[notePath]?.docId,
+      );
       const bundle = await this.fetchConflictBundle(vault, currentDoc);
       if (!bundle || bundle.conflicts.length === 0) {
         throw new Error(`no open conflict found for ${notePath}`);
@@ -1460,6 +1567,8 @@ export class ObsidianLivesyncCogneeController {
         options.forceFull || vault.syncMode === "full",
         task?.signal,
       );
+      let cycleCogneeTarget = this.resolveEffectiveCogneeTarget(vault, options.agentId);
+      let cycleHasCogneeUploads = false;
       stats.lastSeq = String(changes.last_seq ?? runtime.lastSeq);
       for (const row of changes.results) {
         if (task) {
@@ -1498,7 +1607,7 @@ export class ObsidianLivesyncCogneeController {
 
         let currentDoc = doc;
         if (noteDoc?.path) {
-          const conflictResult = await this.inspectConflicts(vault, noteDoc.path);
+          const conflictResult = await this.inspectConflicts(vault, noteDoc.path, noteDoc, trackedNoteState?.docId);
           if (conflictResult.conflictDetected) {
             stats.conflictsDetected += 1;
           }
@@ -1551,14 +1660,20 @@ export class ObsidianLivesyncCogneeController {
           };
           stats.notesDeleted += 1;
           stats.snapshotsWritten += 1;
-          if (await this.uploadSnapshotToCognee(vault, this.resolveEffectiveCogneeTarget(vault, options.agentId), snapshotPath, {
+          const cogneeUpload = await this.uploadSnapshotToCognee(vault, cycleCogneeTarget, snapshotPath, {
             notePath: resolvedPath,
             noteRevision: tombstoneDoc._rev,
             previousRevision: existingNoteState?.rev,
             deleted: true,
+            skipCognify: true,
             signal: task?.signal,
-          })) {
+          });
+          if (cogneeUpload.datasetId && cogneeUpload.datasetId !== cycleCogneeTarget.datasetId) {
+            cycleCogneeTarget = { ...cycleCogneeTarget, datasetId: cogneeUpload.datasetId };
+          }
+          if (cogneeUpload.uploaded) {
             stats.cogneeUploads += 1;
+            cycleHasCogneeUploads = true;
           }
           continue;
         }
@@ -1598,20 +1713,33 @@ export class ObsidianLivesyncCogneeController {
         };
         stats.notesUpserted += 1;
         stats.snapshotsWritten += 1;
-        if (await this.uploadSnapshotToCognee(vault, this.resolveEffectiveCogneeTarget(vault, options.agentId), snapshotPath, {
+        const cogneeUpload = await this.uploadSnapshotToCognee(vault, cycleCogneeTarget, snapshotPath, {
           notePath: resolvedPath,
           noteRevision: liveDoc._rev,
           previousRevision: existingNoteState?.rev,
           deleted: false,
+          skipCognify: true,
           signal: task?.signal,
-        })) {
-          stats.cogneeUploads += 1;
+        });
+        if (cogneeUpload.datasetId && cogneeUpload.datasetId !== cycleCogneeTarget.datasetId) {
+          cycleCogneeTarget = { ...cycleCogneeTarget, datasetId: cogneeUpload.datasetId };
         }
+        if (cogneeUpload.uploaded) {
+          stats.cogneeUploads += 1;
+          cycleHasCogneeUploads = true;
+        }
+      }
+      if (cycleHasCogneeUploads) {
+        await this.runCogneeCognify(vault, cycleCogneeTarget, task?.signal);
       }
       runtime.lastSeq = stats.lastSeq;
       runtime.lastSyncAt = new Date().toISOString();
       runtime.lastError = undefined;
+      const activeNoteCount = Object.values(runtime.notes).filter((note) => !note.deleted).length;
       await this.writeState();
+      this.logger.info(
+        `obsidian-livesync-cognee: sync finished for ${vault.id}: activeNotes=${activeNoteCount} changesSeen=${stats.changesSeen} notesUpserted=${stats.notesUpserted} notesDeleted=${stats.notesDeleted} snapshotsWritten=${stats.snapshotsWritten}`,
+      );
       return stats;
     } catch (error) {
       runtime.lastError = this.isCancellationError(error) ? undefined : error instanceof Error ? error.message : String(error);
@@ -1636,6 +1764,10 @@ export class ObsidianLivesyncCogneeController {
     return vault.snapshotRoot
       ? this.resolvePath(vault.snapshotRoot)
       : path.join(this.baseStateDir, "snapshots", sanitizeSegment(vault.id));
+  }
+
+  private resolveSnapshotLinkedContentRoot(snapshotPath: string): string {
+    return `${snapshotPath}.links`;
   }
 
   private resolveMirrorPath(vault: ResolvedVaultConfig, notePath: string): string {
@@ -1668,6 +1800,7 @@ export class ObsidianLivesyncCogneeController {
     const slug = sanitizeSegment(notePath.replace(/[/.]+/g, "-"));
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const filePath = path.join(snapshotRoot, `${timestamp}-${slug}.md`);
+    const linkedContentFiles = await this.writeSnapshotLinkedContentFiles(filePath, notePath, params.linkedContent);
     const hints = extractFilenameHints(notePath);
     const linkedSources = params.linkedContent.map((item) => item.url);
     const sourceCtimeIso = formatUnixMsAsIso(params.doc.ctime);
@@ -1687,6 +1820,7 @@ export class ObsidianLivesyncCogneeController {
       `filename_people: ${escapeFrontmatterScalar(JSON.stringify(hints.people))}`,
       `links: ${escapeFrontmatterScalar(JSON.stringify(params.links))}`,
       `downloaded_links: ${escapeFrontmatterScalar(JSON.stringify(linkedSources))}`,
+      `downloaded_link_files: ${escapeFrontmatterScalar(JSON.stringify(linkedContentFiles.map((item) => item.fileName)))}`,
       `synced_at: ${escapeFrontmatterScalar(new Date().toISOString())}`,
       "---",
       "",
@@ -1695,15 +1829,55 @@ export class ObsidianLivesyncCogneeController {
       params.deleted ? "_This note was deleted in the remote vault._" : params.content,
     ];
 
-    if (params.linkedContent.length > 0) {
-      frontmatter.push("", "## Downloaded Links", "");
-      for (const linked of params.linkedContent) {
-        frontmatter.push(`### ${linked.url}`, "", linked.content, "");
-      }
-    }
-
     await fs.writeFile(filePath, ensureTrailingNewline(frontmatter.join("\n")), "utf8");
     return filePath;
+  }
+
+  private async writeSnapshotLinkedContentFiles(
+    snapshotPath: string,
+    notePath: string,
+    linkedContent: Array<{ url: string; contentType: string; content: string }>,
+  ): Promise<SnapshotLinkedContentFile[]> {
+    const linkedRoot = this.resolveSnapshotLinkedContentRoot(snapshotPath);
+    if (linkedContent.length === 0) {
+      await fs.rm(linkedRoot, { recursive: true, force: true });
+      return [];
+    }
+    await fs.mkdir(linkedRoot, { recursive: true });
+    const written: SnapshotLinkedContentFile[] = [];
+    for (const [index, linked] of linkedContent.entries()) {
+      const fileName = buildLinkedContentFileName(index, linked.url);
+      await fs.writeFile(
+        path.join(linkedRoot, fileName),
+        buildLinkedContentDocument(notePath, linked),
+        "utf8",
+      );
+      written.push({ fileName, ...linked });
+    }
+    return written;
+  }
+
+  private async readSnapshotLinkedContentFiles(snapshotPath: string): Promise<string[]> {
+    const linkedRoot = this.resolveSnapshotLinkedContentRoot(snapshotPath);
+    try {
+      const entries = (await fs.readdir(linkedRoot)).sort((left, right) => left.localeCompare(right));
+      const contents: string[] = [];
+      for (const entry of entries) {
+        const filePath = path.join(linkedRoot, entry);
+        const stat = await fs.stat(filePath);
+        if (!stat.isFile()) {
+          continue;
+        }
+        contents.push(await fs.readFile(filePath, "utf8"));
+      }
+      return contents;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("ENOENT")) {
+        return [];
+      }
+      throw error;
+    }
   }
 
   private async uploadSnapshotToCognee(
@@ -1718,9 +1892,9 @@ export class ObsidianLivesyncCogneeController {
       deleted?: boolean;
       signal?: AbortSignal;
     } = {},
-  ): Promise<boolean> {
+  ): Promise<CogneeUploadResult> {
     if (!target.enabled || !target.baseUrl) {
-      return false;
+      return { uploaded: false };
     }
     const datasetKey = target.datasetId ?? target.datasetName ?? `vault_${vault.id}`;
     if (options.notePath && options.noteRevision) {
@@ -1729,7 +1903,7 @@ export class ObsidianLivesyncCogneeController {
         storedNote?.lastCogneeRevision === options.noteRevision &&
         storedNote.lastCogneeDatasetKey === datasetKey
       ) {
-        return false;
+        return { uploaded: false, datasetId: target.datasetId };
       }
     }
     try {
@@ -1738,14 +1912,16 @@ export class ObsidianLivesyncCogneeController {
       }
       const uploadPayload = await this.buildCogneeUploadPayload(vault, snapshotPath, options);
       if (!uploadPayload) {
-        if (options.notePath && options.noteRevision) {
-          const storedNote = this.ensureVaultState(vault.id).notes[options.notePath];
-          if (storedNote) {
-            storedNote.lastCogneeRevision = options.noteRevision;
-            storedNote.lastCogneeDatasetKey = datasetKey;
-          }
-        }
-        return false;
+        this.rememberCogneeRevision(vault.id, options.notePath, options.noteRevision, datasetKey);
+        return { uploaded: false, datasetId: target.datasetId };
+      }
+      const invalidReason = this.validateCogneeUploadPayload(uploadPayload);
+      if (invalidReason) {
+        this.logger.warn(
+          `obsidian-livesync-cognee: skipped Cognee upload for vault=${vault.id} note=${options.notePath ?? path.basename(snapshotPath)} because ${invalidReason}`,
+        );
+        this.rememberCogneeRevision(vault.id, options.notePath, options.noteRevision, datasetKey);
+        return { uploaded: false, datasetId: target.datasetId };
       }
       const form = new FormData();
       form.append("data", new Blob([uploadPayload.content], { type: "text/markdown" }), uploadPayload.fileName);
@@ -1758,31 +1934,30 @@ export class ObsidianLivesyncCogneeController {
         form.append("node_set", node);
       }
 
-      await this.fetchCogneeJson<Record<string, unknown>>(target, "/api/v1/add", {
+      const addResponse = await this.fetchCogneeJson<Record<string, unknown>>(target, "/api/v1/add", {
         method: "POST",
         body: form,
         signal: options.signal,
       }, this.getCogneeTimeoutMs(vault, COGNEE_MUTATION_TIMEOUT_MS));
+      const datasetId = typeof addResponse.dataset_id === "string"
+        ? addResponse.dataset_id
+        : typeof addResponse.datasetId === "string"
+          ? addResponse.datasetId
+          : target.datasetId;
 
-      if (options.notePath && options.noteRevision) {
-        const storedNote = this.ensureVaultState(vault.id).notes[options.notePath];
-        if (storedNote) {
-          storedNote.lastCogneeRevision = options.noteRevision;
-          storedNote.lastCogneeDatasetKey = datasetKey;
-        }
-      }
+      this.rememberCogneeRevision(vault.id, options.notePath, options.noteRevision, datasetId ?? datasetKey);
 
       if (!options.skipCognify) {
         await this.runCogneeCognify(vault, target, options.signal);
       }
-      return true;
+      return { uploaded: true, datasetId };
     } catch (error) {
       this.logger.warn(`obsidian-livesync-cognee: Cognee upload failed for ${vault.id}: ${String(error)}`);
       this.notifyVault(vault, `Vault ${vault.id}: Cognee upload failed for ${path.basename(snapshotPath)}. ${String(error)}`, {
         kind: "error",
         contextKey: `vault:${vault.id}:cognee-upload`,
       });
-      return false;
+      return { uploaded: false, datasetId: target.datasetId };
     }
   }
 
@@ -1795,19 +1970,23 @@ export class ObsidianLivesyncCogneeController {
       previousRevision?: string;
       deleted?: boolean;
     },
-  ): Promise<{ fileName: string; content: string } | null> {
+  ): Promise<CogneeUploadPayload | null> {
     const snapshotMarkdown = await fs.readFile(snapshotPath, "utf8");
+    const linkedContentDocuments = await this.readSnapshotLinkedContentFiles(snapshotPath);
+    const uploadMarkdown = linkedContentDocuments.length > 0
+      ? ensureTrailingNewline(snapshotMarkdown) + ["", "## Downloaded Link Files", "", ...linkedContentDocuments].join("\n\n")
+      : snapshotMarkdown;
     if (!options.notePath || !options.noteRevision || !options.previousRevision) {
       return {
         fileName: path.basename(snapshotPath),
-        content: snapshotMarkdown,
+        content: uploadMarkdown,
       };
     }
 
     if (options.deleted) {
       return {
         fileName: path.basename(snapshotPath).replace(/\.md$/i, "-version.md"),
-        content: injectVersionMetadata(snapshotMarkdown, {
+        content: injectVersionMetadata(uploadMarkdown, {
           previousRevision: options.previousRevision,
           sourceRevision: options.noteRevision,
           changeType: "deleted",
@@ -1817,12 +1996,37 @@ export class ObsidianLivesyncCogneeController {
 
     return {
       fileName: path.basename(snapshotPath).replace(/\.md$/i, "-version.md"),
-      content: injectVersionMetadata(snapshotMarkdown, {
+      content: injectVersionMetadata(uploadMarkdown, {
         previousRevision: options.previousRevision,
         sourceRevision: options.noteRevision,
         changeType: "modified",
       }),
     };
+  }
+
+  private validateCogneeUploadPayload(payload: CogneeUploadPayload): string | undefined {
+    const longestLineLength = findLongestLineLength(payload.content);
+    if (longestLineLength > COGNEE_MAX_UPLOAD_LINE_LENGTH) {
+      return `line length ${longestLineLength} exceeds Cognee chunking limit ${COGNEE_MAX_UPLOAD_LINE_LENGTH}`;
+    }
+    return undefined;
+  }
+
+  private rememberCogneeRevision(
+    vaultId: string,
+    notePath: string | undefined,
+    noteRevision: string | undefined,
+    datasetKey: string | undefined,
+  ): void {
+    if (!notePath || !noteRevision || !datasetKey) {
+      return;
+    }
+    const storedNote = this.ensureVaultState(vaultId).notes[notePath];
+    if (!storedNote) {
+      return;
+    }
+    storedNote.lastCogneeRevision = noteRevision;
+    storedNote.lastCogneeDatasetKey = datasetKey;
   }
 
   private async runCogneeCognify(
@@ -1834,21 +2038,62 @@ export class ObsidianLivesyncCogneeController {
       return false;
     }
 
-    const cognifyPayload = target.datasetId
-      ? { dataset_ids: [target.datasetId] }
-      : { datasets: [target.datasetName ?? `vault_${vault.id}`] };
-    await this.fetchCogneeJson<Record<string, unknown>>(
-      target,
-      "/api/v1/cognify",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(cognifyPayload),
-        signal,
-      },
-      this.getCogneeTimeoutMs(vault, COGNEE_MUTATION_TIMEOUT_MS),
-    );
-    return true;
+    const cognifyBodies = this.buildCogneeCognifyBodies(vault, target);
+    let lastError: unknown;
+    for (const body of cognifyBodies) {
+      try {
+        await this.fetchCogneeJson<Record<string, unknown>>(
+          target,
+          "/api/v1/cognify",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+            signal,
+          },
+          this.getCogneeTimeoutMs(vault, COGNEE_MUTATION_TIMEOUT_MS),
+        );
+        return true;
+      } catch (error) {
+        if (this.isCogneeContextLimitError(error)) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `obsidian-livesync-cognee: skipped Cognee cognify for vault=${vault.id} because the target rejected oversized text: ${message}`,
+          );
+          return false;
+                  const activeNoteCount = Object.values(this.ensureVaultState(vaultId).notes).filter((note) => !note.deleted).length;
+                  this.logger.info(
+                    `obsidian-livesync-cognee: repair finished for ${vault.id}: activeNotes=${activeNoteCount} rebuildSnapshots=${Boolean(options.rebuildSnapshots)}`,
+                  );
+        }
+        lastError = error;
+      }
+    }
+
+    if (lastError) {
+      const message = lastError instanceof Error ? lastError.message : String(lastError);
+      this.logger.warn(`obsidian-livesync-cognee: Cognee cognify failed for ${vault.id}: ${message}`);
+    }
+
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  private buildCogneeCognifyBodies(
+    vault: ResolvedVaultConfig,
+    target: ResolvedVaultConfig["cognee"],
+  ): Array<Record<string, unknown>> {
+    const datasetId = target.datasetId;
+    const datasetName = target.datasetName ?? `vault_${vault.id}`;
+    if (datasetId) {
+      return [
+        { datasetIds: [datasetId] },
+        { dataset_ids: [datasetId] },
+      ];
+    }
+    return [
+      { datasetNames: [datasetName] },
+      { datasets: [datasetName] },
+    ];
   }
 
   private async runCogneeMemify(
@@ -1941,6 +2186,12 @@ export class ObsidianLivesyncCogneeController {
   private isCogneeBackgroundMemifyCompatibilityError(error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error);
     return /UUID' object is not iterable|HTTP 409 .*\/api\/v1\/memify/i.test(message);
+  }
+
+  private isCogneeContextLimitError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /HTTP 409 .*\/api\/v1\/cognify/i.test(message)
+      && /Text too long for embedding model|input length exceeds the context length|longer than chunking size\s*8191/i.test(message);
   }
 
   private getCogneeTimeoutMs(vault: ResolvedVaultConfig, minimumMs: number): number {
@@ -2105,27 +2356,67 @@ export class ObsidianLivesyncCogneeController {
         break;
       }
       try {
-        const response = await fetch(link.url, {
-          headers: { "User-Agent": "OpenClaw-ObsidianLiveSyncCognee/1.0" },
-        });
-        const contentType = response.headers.get("content-type") ?? "application/octet-stream";
-        if (!response.ok) {
-          this.logger.warn(
-            `obsidian-livesync-cognee: linked HTTP fetch skipped note=${notePath} url=${link.url} status=${response.status}`,
-          );
-          continue;
+        const controller = new AbortController();
+        const timeoutMs = Math.min(vault.requestTimeoutMs, EXTERNAL_LINK_FETCH_TIMEOUT_MS);
+        const timer = setTimeout(
+          () => controller.abort(new Error(`linked HTTP fetch timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+        try {
+          const response = await fetch(link.url, {
+            dispatcher: getExternalFetchDispatcher(),
+            redirect: "follow",
+            signal: controller.signal,
+            headers: {
+              "User-Agent": EXTERNAL_HTTP_FETCH_USER_AGENT,
+              Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+              "Accept-Language": "en-US,en;q=0.8",
+              "Cache-Control": "max-age=0",
+              Pragma: "no-cache",
+              "Sec-Fetch-Dest": "document",
+              "Sec-Fetch-Mode": "navigate",
+              "Sec-Fetch-Site": "none",
+              "Sec-Fetch-User": "?1",
+              "Upgrade-Insecure-Requests": "1",
+            },
+          } as RequestInit & { dispatcher?: EnvHttpProxyAgent });
+          const contentType = response.headers.get("content-type") ?? "application/octet-stream";
+          if (!response.ok) {
+            this.logger.warn(
+              `obsidian-livesync-cognee: linked HTTP fetch skipped note=${notePath} url=${link.url} status=${response.status}`,
+            );
+            await response.body?.cancel?.().catch(() => undefined);
+            continue;
+          }
+          const contentLength = parseContentLength(response.headers.get("content-length"));
+          if (contentLength !== undefined && contentLength > vault.cognee.maxLinkBytes) {
+            this.logger.warn(
+              `obsidian-livesync-cognee: linked HTTP fetch skipped note=${notePath} url=${link.url} because content-length=${contentLength} exceeds maxLinkBytes=${vault.cognee.maxLinkBytes}`,
+            );
+            await response.body?.cancel?.().catch(() => undefined);
+            continue;
+          }
+          if (!isInlineTextContentType(contentType)) {
+            this.logger.warn(
+              `obsidian-livesync-cognee: linked HTTP fetch skipped note=${notePath} url=${link.url} because content-type=${contentType} is not inline text content`,
+            );
+            await response.body?.cancel?.().catch(() => undefined);
+            continue;
+          }
+          const raw = await response.text();
+          const limited = raw.slice(0, vault.cognee.maxLinkBytes);
+          const content = contentType.includes("html") ? stripHtml(limited) : limited;
+          if (!content.trim()) {
+            continue;
+          }
+          results.push({
+            url: link.url,
+            contentType,
+            content: `Source note: ${notePath}\n\n${content}`,
+          });
+        } finally {
+          clearTimeout(timer);
         }
-        const raw = await response.text();
-        const limited = raw.slice(0, vault.cognee.maxLinkBytes);
-        const content = contentType.includes("html") ? stripHtml(limited) : limited;
-        if (!content.trim()) {
-          continue;
-        }
-        results.push({
-          url: link.url,
-          contentType,
-          content: `Source note: ${notePath}\n\n${content}`,
-        });
       } catch (error) {
         this.logger.warn(
           `obsidian-livesync-cognee: linked HTTP fetch failed note=${notePath} url=${link.url}: ${String(error)}`,
@@ -2138,8 +2429,9 @@ export class ObsidianLivesyncCogneeController {
   private async fetchNoteContentByPath(
     vault: ResolvedVaultConfig,
     notePath: string,
+    trackedDocId?: string,
   ): Promise<{ doc: CouchNoteDoc; content: string; deleted: boolean }> {
-    const docId = pathToDocumentId(vault, notePath);
+    const docId = trackedDocId ?? pathToDocumentId(vault, notePath);
     const rawDoc = await this.fetchJson<CouchNoteDoc>(vault, `/${encodeURIComponent(docId)}`);
     const doc = await this.decodeNoteDoc(vault, rawDoc);
     if (!this.isNoteDoc(doc)) {
@@ -2194,11 +2486,35 @@ export class ObsidianLivesyncCogneeController {
     forceFull: boolean,
     signal?: AbortSignal,
   ): Promise<CouchChangesResponse> {
-    const params = new URLSearchParams();
-    params.set("include_docs", "true");
-    params.set("limit", "200");
-    params.set("since", forceFull ? "0" : since || "0");
-    return this.fetchJson<CouchChangesResponse>(vault, `/_changes?${params.toString()}`, { signal });
+    const initialSince = forceFull ? "0" : since || "0";
+    let cursor: string | number = initialSince;
+    let finalLastSeq: string | number | undefined;
+    const results: CouchChangesResponse["results"] = [];
+
+    while (true) {
+      const params = new URLSearchParams();
+      params.set("include_docs", "true");
+      params.set("limit", String(CHANGES_PAGE_LIMIT));
+      params.set("since", String(cursor));
+      const page = await this.fetchJson<CouchChangesResponse>(vault, `/_changes?${params.toString()}`, { signal });
+      results.push(...page.results);
+      finalLastSeq = page.last_seq;
+
+      if (page.results.length < CHANGES_PAGE_LIMIT) {
+        break;
+      }
+
+      const lastRowSeq = page.results[page.results.length - 1]?.seq;
+      if (lastRowSeq === undefined || String(lastRowSeq) === String(cursor)) {
+        break;
+      }
+      cursor = lastRowSeq;
+    }
+
+    return {
+      results,
+      last_seq: finalLastSeq ?? initialSince,
+    };
   }
 
   private async tryGetDoc(vault: ResolvedVaultConfig, docId: string): Promise<CouchNoteDoc | null> {
@@ -2213,8 +2529,16 @@ export class ObsidianLivesyncCogneeController {
     }
   }
 
-  private async fetchConflictProbeByPath(vault: ResolvedVaultConfig, notePath: string): Promise<CouchNoteDoc> {
-    const docId = pathToDocumentId(vault, notePath);
+  private async fetchConflictProbeByPath(
+    vault: ResolvedVaultConfig,
+    notePath: string,
+    trackedDocId?: string,
+  ): Promise<CouchNoteDoc> {
+    const docId = trackedDocId ?? pathToDocumentId(vault, notePath);
+    return this.fetchJson<CouchNoteDoc>(vault, `/${encodeURIComponent(docId)}?conflicts=true`);
+  }
+
+  private async fetchConflictProbeByDocId(vault: ResolvedVaultConfig, docId: string): Promise<CouchNoteDoc> {
     return this.fetchJson<CouchNoteDoc>(vault, `/${encodeURIComponent(docId)}?conflicts=true`);
   }
 
@@ -2322,8 +2646,12 @@ export class ObsidianLivesyncCogneeController {
   private async inspectConflicts(
     vault: ResolvedVaultConfig,
     notePath: string,
+    currentDoc?: CouchNoteDoc,
+    trackedDocId?: string,
   ): Promise<{ currentDoc?: CouchNoteDoc; conflictDetected: boolean; autoResolved: boolean }> {
-    const probe = await this.fetchConflictProbeByPath(vault, notePath);
+    const probe = currentDoc?._id
+      ? await this.fetchConflictProbeByDocId(vault, currentDoc._id)
+      : await this.fetchConflictProbeByPath(vault, notePath, trackedDocId);
     const readableProbe = await this.decodeNoteDoc(vault, probe);
     const bundle = await this.fetchConflictBundle(vault, probe);
     if (!bundle || bundle.conflicts.length === 0) {

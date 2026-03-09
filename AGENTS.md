@@ -5,4 +5,5 @@
 - If this repo has `package.json`, run `npm pack --dry-run --json` and audit the exact publish payload too.
 - If tracked or npm-published files contain local/private-style literals, stop and clean them before staging or pushing.
 - Prefer neutral placeholders such as `example.invalid`, `example.test`, and `EXAMPLE_*` in docs, tests, fixtures, and examples.
+- For this user, never use MCP tools for GitHub or Git operations; use terminal `git` and `gh` CLI commands unless the user explicitly says otherwise.
 - Before any commit or push, show the planned command sequence and wait for user approval.

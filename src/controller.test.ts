@@ -67,7 +67,7 @@ function createConfig(overrides: Partial<ResolvedPluginConfig["vaults"][number]>
           enabled: false,
           nodeSet: [],
           cognify: true,
-          downloadHttpLinks: true,
+          downloadHttpLinks: false,
           maxLinksPerNote: 3,
           maxLinkBytes: 1024,
           searchType: "CHUNKS",
@@ -82,6 +82,9 @@ function createConfig(overrides: Partial<ResolvedPluginConfig["vaults"][number]>
 describe("obsidian-livesync-cognee controller", () => {
   let tempDir: string;
   const originalFetch = global.fetch;
+  const originalHttpProxy = process.env.http_proxy;
+  const originalHttpsProxy = process.env.https_proxy;
+  const originalNoProxy = process.env.no_proxy;
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-obsidian-sync-"));
@@ -89,6 +92,9 @@ describe("obsidian-livesync-cognee controller", () => {
 
   afterEach(async () => {
     global.fetch = originalFetch;
+    process.env.http_proxy = originalHttpProxy;
+    process.env.https_proxy = originalHttpsProxy;
+    process.env.no_proxy = originalNoProxy;
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 
@@ -159,6 +165,920 @@ describe("obsidian-livesync-cognee controller", () => {
     const statuses = controller.getStatuses();
     const mirrorFile = path.join(statuses[0]!.mirrorRoot, "daily", "note.md");
     await expect(fs.readFile(mirrorFile, "utf8")).resolves.toContain("hello from vault");
+  });
+
+  it("reuses the remote doc id discovered during sync when path-derived ids differ", async () => {
+    const requests: string[] = [];
+    const config = createConfig({
+      configSource: "setup-uri",
+      encrypt: true,
+      passphrase: "vault-passphrase",
+      usePathObfuscation: true,
+    });
+
+    global.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      requests.push(url.replace("https://couchdb.example.invalid/vault-a-db", ""));
+      if (url.includes("_changes")) {
+        return new Response(
+          JSON.stringify({
+            results: [
+              {
+                seq: "1-g1",
+                id: "f:remote-id",
+                doc: {
+                  _id: "f:remote-id",
+                  _rev: "1-a",
+                  path: "daily/note.md",
+                  type: "plain",
+                  datatype: "plain",
+                  data: ["hello from remote id\n"],
+                  children: [],
+                  ctime: 1,
+                  mtime: 2,
+                  size: 21,
+                  eden: {},
+                },
+              },
+            ],
+            last_seq: "1-g1",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("f%3Aremote-id?conflicts=true")) {
+        return new Response(
+          JSON.stringify({
+            _id: "f:remote-id",
+            _rev: "1-a",
+            path: "daily/note.md",
+            type: "plain",
+            datatype: "plain",
+            data: ["hello from remote id\n"],
+            children: [],
+            ctime: 1,
+            mtime: 2,
+            size: 21,
+            eden: {},
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/f%3Aremote-id")) {
+        return new Response(
+          JSON.stringify({
+            _id: "f:remote-id",
+            _rev: "1-a",
+            path: "daily/note.md",
+            type: "plain",
+            datatype: "plain",
+            data: ["hello from remote id\n"],
+            children: [],
+            ctime: 1,
+            mtime: 2,
+            size: 21,
+            eden: {},
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`unexpected url ${url}`);
+    }) as typeof fetch;
+
+    const controller = new ObsidianLivesyncCogneeController({
+      config,
+      logger: { info() {}, warn() {}, error() {} },
+      resolvePath: (value) => value,
+      stateDir: tempDir,
+    });
+
+    const stats = await controller.syncVault("vault-a");
+    expect(stats.notesUpserted).toBe(1);
+    expect(requests).toContain("/f%3Aremote-id?conflicts=true");
+    expect(requests).not.toContain("/daily%2Fnote.md?conflicts=true");
+
+    const note = await controller.readNote("vault-a", "daily/note.md");
+    expect(note.content).toContain("hello from remote id");
+    expect(requests).toContain("/f%3Aremote-id");
+  });
+
+  it("paginates CouchDB changes beyond the first 200 rows", async () => {
+    const changeRequests: string[] = [];
+    const firstPageResults = Array.from({ length: 200 }, (_value, index) => ({
+      seq: String(index + 1),
+      id: `daily/note-${index + 1}.md`,
+      doc: {
+        _id: `daily/note-${index + 1}.md`,
+        _rev: `1-${index + 1}`,
+        path: `daily/note-${index + 1}.md`,
+        type: "plain",
+        datatype: "plain",
+        data: [`note ${index + 1}\n`],
+        children: [],
+        ctime: 1,
+        mtime: index + 1,
+        size: 8,
+        eden: {},
+      },
+    }));
+    const finalDoc = {
+      _id: "daily/note-201.md",
+      _rev: "1-201",
+      path: "daily/note-201.md",
+      type: "plain",
+      datatype: "plain",
+      data: ["note 201\n"],
+      children: [],
+      ctime: 1,
+      mtime: 201,
+      size: 9,
+      eden: {},
+    };
+
+    global.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.includes("_changes")) {
+        changeRequests.push(url);
+        if (url.endsWith("since=0")) {
+          return new Response(
+            JSON.stringify({
+              results: firstPageResults,
+              last_seq: "201",
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("since=200")) {
+          return new Response(
+            JSON.stringify({
+              results: [
+                {
+                  seq: "201",
+                  id: finalDoc._id,
+                  doc: finalDoc,
+                },
+              ],
+              last_seq: "201",
+            }),
+            { status: 200 },
+          );
+        }
+      }
+      if (url.endsWith("?conflicts=true")) {
+        const encodedId = url.split("/").pop()?.replace("?conflicts=true", "") ?? "";
+        const notePath = decodeURIComponent(encodedId);
+        return new Response(
+          JSON.stringify({
+            _id: notePath,
+            _rev: "1-a",
+            path: notePath,
+            type: "plain",
+            datatype: "plain",
+            data: ["ok\n"],
+            children: [],
+            ctime: 1,
+            mtime: 1,
+            size: 3,
+            eden: {},
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`unexpected url ${url}`);
+    }) as typeof fetch;
+
+    const controller = new ObsidianLivesyncCogneeController({
+      config: createConfig(),
+      logger: { info() {}, warn() {}, error() {} },
+      resolvePath: (value) => value,
+      stateDir: tempDir,
+    });
+
+    const stats = await controller.syncVault("vault-a", { forceFull: true });
+    expect(stats.changesSeen).toBe(201);
+    expect(stats.notesUpserted).toBe(201);
+    expect(changeRequests).toHaveLength(2);
+    expect(changeRequests[0]).toContain("since=0");
+    expect(changeRequests[1]).toContain("since=200");
+  });
+
+  it("treats Cognee context-length cognify failures as non-fatal after upload succeeds", async () => {
+    const warnings: string[] = [];
+    const config = createConfig({
+      cognee: {
+        enabled: true,
+        baseUrl: "https://cognee.example.invalid",
+        datasetName: "vault-a",
+        nodeSet: [],
+        cognify: true,
+        downloadHttpLinks: false,
+        maxLinksPerNote: 0,
+        maxLinkBytes: 1024,
+        searchType: "CHUNKS",
+        searchTopK: 5,
+      },
+    });
+
+    global.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.includes("_changes")) {
+        return new Response(
+          JSON.stringify({
+            results: [
+              {
+                seq: "1-g1",
+                id: "daily/note.md",
+                doc: {
+                  _id: "daily/note.md",
+                  _rev: "1-a",
+                  path: "daily/note.md",
+                  type: "plain",
+                  datatype: "plain",
+                  data: ["hello from vault\n"],
+                  children: [],
+                  ctime: 1,
+                  mtime: 2,
+                  size: 17,
+                  eden: {},
+                },
+              },
+            ],
+            last_seq: "1-g1",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("?conflicts=true")) {
+        return new Response(
+          JSON.stringify({
+            _id: "daily/note.md",
+            _rev: "1-a",
+            path: "daily/note.md",
+            type: "plain",
+            datatype: "plain",
+            data: ["hello from vault\n"],
+            children: [],
+            ctime: 1,
+            mtime: 2,
+            size: 17,
+            eden: {},
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "https://cognee.example.invalid/api/v1/add") {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url === "https://cognee.example.invalid/api/v1/cognify") {
+        return new Response(
+          JSON.stringify({ error: "Text too long for embedding model: the input length exceeds the context length" }),
+          { status: 409 },
+        );
+      }
+      throw new Error(`unexpected url ${url}`);
+    }) as typeof fetch;
+
+    const controller = new ObsidianLivesyncCogneeController({
+      config,
+      logger: { info() {}, warn(message: string) { warnings.push(message); }, error() {} },
+      resolvePath: (value) => value,
+      stateDir: tempDir,
+    });
+
+    const stats = await controller.syncVault("vault-a");
+    expect(stats.notesUpserted).toBe(1);
+    expect(stats.cogneeUploads).toBe(1);
+    expect(warnings.some((message) => message.includes("skipped Cognee cognify"))).toBe(true);
+  });
+
+  it("treats Cognee chunking-limit cognify failures as non-fatal after upload succeeds", async () => {
+    const warnings: string[] = [];
+    const config = createConfig({
+      cognee: {
+        enabled: true,
+        baseUrl: "https://cognee.example.invalid",
+        datasetName: "vault-a",
+        nodeSet: [],
+        cognify: true,
+        downloadHttpLinks: false,
+        maxLinksPerNote: 0,
+        maxLinkBytes: 1024,
+        searchType: "CHUNKS",
+        searchTopK: 5,
+      },
+    });
+
+    global.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.includes("_changes")) {
+        return new Response(
+          JSON.stringify({
+            results: [
+              {
+                seq: "1-g1",
+                id: "daily/note.md",
+                doc: {
+                  _id: "daily/note.md",
+                  _rev: "1-a",
+                  path: "daily/note.md",
+                  type: "plain",
+                  datatype: "plain",
+                  data: ["hello from vault\n"],
+                  children: [],
+                  ctime: 1,
+                  mtime: 2,
+                  size: 17,
+                  eden: {},
+                },
+              },
+            ],
+            last_seq: "1-g1",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("?conflicts=true")) {
+        return new Response(
+          JSON.stringify({
+            _id: "daily/note.md",
+            _rev: "1-a",
+            path: "daily/note.md",
+            type: "plain",
+            datatype: "plain",
+            data: ["hello from vault\n"],
+            children: [],
+            ctime: 1,
+            mtime: 2,
+            size: 17,
+            eden: {},
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "https://cognee.example.invalid/api/v1/add") {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url === "https://cognee.example.invalid/api/v1/cognify") {
+        return new Response(
+          JSON.stringify({ error: "line longer than chunking size 8191." }),
+          { status: 409 },
+        );
+      }
+      throw new Error(`unexpected url ${url}`);
+    }) as typeof fetch;
+
+    const controller = new ObsidianLivesyncCogneeController({
+      config,
+      logger: { info() {}, warn(message: string) { warnings.push(message); }, error() {} },
+      resolvePath: (value) => value,
+      stateDir: tempDir,
+    });
+
+    const stats = await controller.syncVault("vault-a");
+    expect(stats.notesUpserted).toBe(1);
+    expect(stats.cogneeUploads).toBe(1);
+    expect(warnings.some((message) => message.includes("skipped Cognee cognify"))).toBe(true);
+  });
+
+  it("prefers datasetIds when cognify targets a resolved dataset id", async () => {
+    const cognifyBodies: string[] = [];
+    const config = createConfig({
+      cognee: {
+        enabled: true,
+        baseUrl: "https://cognee.example.invalid",
+        datasetId: "dataset-1",
+        datasetName: "vault-a",
+        nodeSet: [],
+        cognify: true,
+        downloadHttpLinks: false,
+        maxLinksPerNote: 0,
+        maxLinkBytes: 1024,
+        searchType: "CHUNKS",
+        searchTopK: 5,
+      },
+    });
+
+    global.fetch = vi.fn(async (input, init) => {
+      const url = String(input);
+      if (url.includes("_changes")) {
+        return new Response(
+          JSON.stringify({
+            results: [
+              {
+                seq: "1-g1",
+                id: "daily/note.md",
+                doc: {
+                  _id: "daily/note.md",
+                  _rev: "1-a",
+                  path: "daily/note.md",
+                  type: "plain",
+                  datatype: "plain",
+                  data: ["hello from vault\n"],
+                  children: [],
+                  ctime: 1,
+                  mtime: 2,
+                  size: 17,
+                  eden: {},
+                },
+              },
+            ],
+            last_seq: "1-g1",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("?conflicts=true")) {
+        return new Response(
+          JSON.stringify({
+            _id: "daily/note.md",
+            _rev: "1-a",
+            path: "daily/note.md",
+            type: "plain",
+            datatype: "plain",
+            data: ["hello from vault\n"],
+            children: [],
+            ctime: 1,
+            mtime: 2,
+            size: 17,
+            eden: {},
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "https://cognee.example.invalid/api/v1/add") {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url === "https://cognee.example.invalid/api/v1/cognify") {
+        cognifyBodies.push(String(init?.body ?? ""));
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      throw new Error(`unexpected url ${url}`);
+    }) as typeof fetch;
+
+    const controller = new ObsidianLivesyncCogneeController({
+      config,
+      logger: { info() {}, warn() {}, error() {} },
+      resolvePath: (value) => value,
+      stateDir: tempDir,
+    });
+
+    const stats = await controller.syncVault("vault-a");
+    expect(stats.notesUpserted).toBe(1);
+    expect(cognifyBodies).toHaveLength(1);
+    expect(cognifyBodies[0]).toContain('"datasetIds":["dataset-1"]');
+  });
+
+  it("uses the environment proxy agent for external linked HTTP fetches", async () => {
+    process.env.http_proxy = "http://192.0.2.10:7890";
+    process.env.https_proxy = "http://192.0.2.10:7890";
+    process.env.no_proxy = "127.0.0.1,localhost";
+
+    const fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
+    const config = createConfig({
+      cognee: {
+        enabled: false,
+        nodeSet: [],
+        cognify: false,
+        downloadHttpLinks: true,
+        maxLinksPerNote: 1,
+        maxLinkBytes: 1024,
+        searchType: "CHUNKS",
+        searchTopK: 5,
+      },
+    });
+
+    global.fetch = vi.fn(async (input, init) => {
+      const url = String(input);
+      fetchCalls.push({ url, init });
+      if (url.includes("_changes")) {
+        return new Response(
+          JSON.stringify({
+            results: [
+              {
+                seq: "1-g1",
+                id: "daily/note.md",
+                doc: {
+                  _id: "daily/note.md",
+                  _rev: "1-a",
+                  path: "daily/note.md",
+                  type: "plain",
+                  datatype: "plain",
+                  data: ["See https://example.com/reference\n"],
+                  children: [],
+                  ctime: 1,
+                  mtime: 2,
+                  size: 34,
+                  eden: {},
+                },
+              },
+            ],
+            last_seq: "1-g1",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("?conflicts=true")) {
+        return new Response(
+          JSON.stringify({
+            _id: "daily/note.md",
+            _rev: "1-a",
+            path: "daily/note.md",
+            type: "plain",
+            datatype: "plain",
+            data: ["See https://example.com/reference\n"],
+            children: [],
+            ctime: 1,
+            mtime: 2,
+            size: 34,
+            eden: {},
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "https://example.com/reference") {
+        return new Response("<html><body>reference body</body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
+      }
+      throw new Error(`unexpected url ${url}`);
+    }) as typeof fetch;
+
+    const controller = new ObsidianLivesyncCogneeController({
+      config,
+      logger: { info() {}, warn() {}, error() {} },
+      resolvePath: (value) => value,
+      stateDir: tempDir,
+    });
+
+    const stats = await controller.syncVault("vault-a");
+    expect(stats.notesUpserted).toBe(1);
+
+    const externalCall = fetchCalls.find((call) => call.url === "https://example.com/reference");
+    expect(externalCall).toBeDefined();
+    expect(externalCall?.init?.dispatcher).toBeTruthy();
+    expect(externalCall?.init?.redirect).toBe("follow");
+    expect((externalCall?.init?.headers as Record<string, string>)?.["User-Agent"]).toContain("Mozilla/5.0");
+
+    const statePath = path.join(tempDir, "plugins", "obsidian-livesync-cognee", "state.json");
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { vaults: Record<string, { notes: Record<string, { lastSnapshotPath?: string }> }> };
+    const writtenSnapshot = state.vaults["vault-a"]?.notes["daily/note.md"]?.lastSnapshotPath;
+    const snapshot = await fs.readFile(String(writtenSnapshot), "utf8");
+    expect(snapshot).not.toContain("reference body");
+    expect(snapshot).toContain('downloaded_link_files: "[');
+    const linkedFiles = await fs.readdir(`${writtenSnapshot}.links`);
+    expect(linkedFiles).toHaveLength(1);
+    const linkedContent = await fs.readFile(path.join(`${writtenSnapshot}.links`, linkedFiles[0] ?? ""), "utf8");
+    expect(linkedContent).toContain("reference body");
+  });
+
+  it("skips oversized external linked content before reading the body", async () => {
+    const warnings: string[] = [];
+    const config = createConfig({
+      cognee: {
+        enabled: false,
+        nodeSet: [],
+        cognify: false,
+        downloadHttpLinks: true,
+        maxLinksPerNote: 1,
+        maxLinkBytes: 1024,
+        searchType: "CHUNKS",
+        searchTopK: 5,
+      },
+    });
+
+    global.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.includes("_changes")) {
+        return new Response(
+          JSON.stringify({
+            results: [
+              {
+                seq: "1-g1",
+                id: "daily/note.md",
+                doc: {
+                  _id: "daily/note.md",
+                  _rev: "1-a",
+                  path: "daily/note.md",
+                  type: "plain",
+                  datatype: "plain",
+                  data: ["See https://example.com/large.pdf\n"],
+                  children: [],
+                  ctime: 1,
+                  mtime: 2,
+                  size: 34,
+                  eden: {},
+                },
+              },
+            ],
+            last_seq: "1-g1",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("?conflicts=true")) {
+        return new Response(
+          JSON.stringify({
+            _id: "daily/note.md",
+            _rev: "1-a",
+            path: "daily/note.md",
+            type: "plain",
+            datatype: "plain",
+            data: ["See https://example.com/large.pdf\n"],
+            children: [],
+            ctime: 1,
+            mtime: 2,
+            size: 34,
+            eden: {},
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "https://example.com/large.pdf") {
+        return new Response("", {
+          status: 200,
+          headers: {
+            "content-type": "application/pdf",
+            "content-length": "104857600",
+          },
+        });
+      }
+      throw new Error(`unexpected url ${url}`);
+    }) as typeof fetch;
+
+    const controller = new ObsidianLivesyncCogneeController({
+      config,
+      logger: { info() {}, warn(message: string) { warnings.push(message); }, error() {} },
+      resolvePath: (value) => value,
+      stateDir: tempDir,
+    });
+
+    const stats = await controller.syncVault("vault-a");
+    expect(stats.notesUpserted).toBe(1);
+    expect(warnings.some((message) => message.includes("content-length=104857600 exceeds maxLinkBytes=1024"))).toBe(true);
+
+    const statePath = path.join(tempDir, "plugins", "obsidian-livesync-cognee", "state.json");
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { vaults: Record<string, { notes: Record<string, { lastSnapshotPath?: string }> }> };
+    const writtenSnapshot = state.vaults["vault-a"]?.notes["daily/note.md"]?.lastSnapshotPath;
+    expect(writtenSnapshot).toBeDefined();
+    const snapshot = await fs.readFile(String(writtenSnapshot), "utf8");
+    expect(snapshot).not.toContain("## Downloaded Links");
+  });
+
+  it("skips unsupported binary external linked content types quickly", async () => {
+    const warnings: string[] = [];
+    const config = createConfig({
+      cognee: {
+        enabled: false,
+        nodeSet: [],
+        cognify: false,
+        downloadHttpLinks: true,
+        maxLinksPerNote: 1,
+        maxLinkBytes: 4096,
+        searchType: "CHUNKS",
+        searchTopK: 5,
+      },
+    });
+
+    global.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.includes("_changes")) {
+        return new Response(
+          JSON.stringify({
+            results: [
+              {
+                seq: "1-g1",
+                id: "daily/note.md",
+                doc: {
+                  _id: "daily/note.md",
+                  _rev: "1-a",
+                  path: "daily/note.md",
+                  type: "plain",
+                  datatype: "plain",
+                  data: ["See https://example.com/slides.pptx\n"],
+                  children: [],
+                  ctime: 1,
+                  mtime: 2,
+                  size: 34,
+                  eden: {},
+                },
+              },
+            ],
+            last_seq: "1-g1",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("?conflicts=true")) {
+        return new Response(
+          JSON.stringify({
+            _id: "daily/note.md",
+            _rev: "1-a",
+            path: "daily/note.md",
+            type: "plain",
+            datatype: "plain",
+            data: ["See https://example.com/slides.pptx\n"],
+            children: [],
+            ctime: 1,
+            mtime: 2,
+            size: 34,
+            eden: {},
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "https://example.com/slides.pptx") {
+        return new Response("", {
+          status: 200,
+          headers: {
+            "content-type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "content-length": "512",
+          },
+        });
+      }
+      throw new Error(`unexpected url ${url}`);
+    }) as typeof fetch;
+
+    const controller = new ObsidianLivesyncCogneeController({
+      config,
+      logger: { info() {}, warn(message: string) { warnings.push(message); }, error() {} },
+      resolvePath: (value) => value,
+      stateDir: tempDir,
+    });
+
+    const stats = await controller.syncVault("vault-a");
+    expect(stats.notesUpserted).toBe(1);
+    expect(warnings.some((message) => message.includes("content-type=application/vnd.openxmlformats-officedocument.presentationml.presentation is not inline text content"))).toBe(true);
+  });
+
+  it("bounds linked HTTP body reads with the short external fetch timeout", async () => {
+    const warnings: string[] = [];
+    const config = createConfig({
+      requestTimeoutMs: 25,
+      cognee: {
+        enabled: false,
+        nodeSet: [],
+        cognify: false,
+        downloadHttpLinks: true,
+        maxLinksPerNote: 1,
+        maxLinkBytes: 4096,
+        searchType: "CHUNKS",
+        searchTopK: 5,
+      },
+    });
+
+    global.fetch = vi.fn(async (_input, init) => {
+      const url = String(_input);
+      if (url.includes("_changes")) {
+        return new Response(
+          JSON.stringify({
+            results: [
+              {
+                seq: "1-g1",
+                id: "daily/note.md",
+                doc: {
+                  _id: "daily/note.md",
+                  _rev: "1-a",
+                  path: "daily/note.md",
+                  type: "plain",
+                  datatype: "plain",
+                  data: ["See https://example.com/slow-body\n"],
+                  children: [],
+                  ctime: 1,
+                  mtime: 2,
+                  size: 34,
+                  eden: {},
+                },
+              },
+            ],
+            last_seq: "1-g1",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("?conflicts=true")) {
+        return new Response(
+          JSON.stringify({
+            _id: "daily/note.md",
+            _rev: "1-a",
+            path: "daily/note.md",
+            type: "plain",
+            datatype: "plain",
+            data: ["See https://example.com/slow-body\n"],
+            children: [],
+            ctime: 1,
+            mtime: 2,
+            size: 34,
+            eden: {},
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "https://example.com/slow-body") {
+        const signal = init?.signal;
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ "content-type": "text/html" }),
+          body: { cancel: vi.fn(async () => undefined) },
+          text: () => new Promise<string>((resolve, reject) => {
+            const timer = setTimeout(() => resolve("late body"), 250);
+            const abortHandler = () => {
+              clearTimeout(timer);
+              reject(signal?.reason ?? new Error("linked HTTP fetch aborted"));
+            };
+            if (signal?.aborted) {
+              abortHandler();
+              return;
+            }
+            signal?.addEventListener("abort", abortHandler, { once: true });
+          }),
+        } as unknown as Response;
+      }
+      throw new Error(`unexpected url ${url}`);
+    }) as typeof fetch;
+
+    const controller = new ObsidianLivesyncCogneeController({
+      config,
+      logger: { info() {}, warn(message: string) { warnings.push(message); }, error() {} },
+      resolvePath: (value) => value,
+      stateDir: tempDir,
+    });
+
+    const stats = await controller.syncVault("vault-a");
+    expect(stats.notesUpserted).toBe(1);
+    expect(warnings.some((message) => message.includes("linked HTTP fetch timed out after 25ms"))).toBe(true);
+
+    const statePath = path.join(tempDir, "plugins", "obsidian-livesync-cognee", "state.json");
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { vaults: Record<string, { notes: Record<string, { lastSnapshotPath?: string }> }> };
+    const writtenSnapshot = state.vaults["vault-a"]?.notes["daily/note.md"]?.lastSnapshotPath;
+    const snapshot = await fs.readFile(String(writtenSnapshot), "utf8");
+    expect(snapshot).not.toContain("## Downloaded Links");
+  });
+
+  it("logs active note counts when sync finishes", async () => {
+    const infos: string[] = [];
+    const config = createConfig();
+
+    global.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.includes("_changes")) {
+        return new Response(
+          JSON.stringify({
+            results: [
+              {
+                seq: "1-g1",
+                id: "daily/note.md",
+                doc: {
+                  _id: "daily/note.md",
+                  _rev: "1-a",
+                  path: "daily/note.md",
+                  type: "plain",
+                  datatype: "plain",
+                  data: ["hello from vault\n"],
+                  children: [],
+                  ctime: 1,
+                  mtime: 2,
+                  size: 17,
+                  eden: {},
+                },
+              },
+            ],
+            last_seq: "1-g1",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("?conflicts=true")) {
+        return new Response(
+          JSON.stringify({
+            _id: "daily/note.md",
+            _rev: "1-a",
+            path: "daily/note.md",
+            type: "plain",
+            datatype: "plain",
+            data: ["hello from vault\n"],
+            children: [],
+            ctime: 1,
+            mtime: 2,
+            size: 17,
+            eden: {},
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`unexpected url ${url}`);
+    }) as typeof fetch;
+
+    const controller = new ObsidianLivesyncCogneeController({
+      config,
+      logger: { info(message: string) { infos.push(message); }, warn() {}, error() {} },
+      resolvePath: (value) => value,
+      stateDir: tempDir,
+    });
+
+    await controller.syncVault("vault-a");
+    expect(infos.some((message) => message.includes("sync finished for vault-a: activeNotes=1"))).toBe(true);
   });
 
   it("writes a plain note back to a read-write vault", async () => {
@@ -1126,6 +2046,9 @@ describe("obsidian-livesync-cognee controller", () => {
         addCalls.push(String(init?.body ?? ""));
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       }
+      if (url === "https://cognee.example.invalid/api/v1/cognify") {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
       if (url === "https://cognee.example.invalid/api/v1/memify") {
         memifyCalls.push(String(init?.body ?? ""));
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
@@ -1557,6 +2480,9 @@ describe("obsidian-livesync-cognee controller", () => {
         addCalls.push(String(init?.body ?? ""));
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       }
+      if (url === "https://cognee.example.invalid/api/v1/cognify") {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
       if (url === "https://cognee.example.invalid/api/v1/memify") {
         memifyCalls.push(String(init?.body ?? ""));
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
@@ -1681,6 +2607,9 @@ describe("obsidian-livesync-cognee controller", () => {
       if (url === "https://cognee.example.invalid/api/v1/add") {
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       }
+      if (url === "https://cognee.example.invalid/api/v1/cognify") {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
       if (url === "https://cognee.example.invalid/api/v1/memify") {
         memifyCalls.push(String(init?.body ?? ""));
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
@@ -1793,6 +2722,9 @@ describe("obsidian-livesync-cognee controller", () => {
         );
       }
       if (url === "https://cognee.example.invalid/api/v1/add") {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url === "https://cognee.example.invalid/api/v1/cognify") {
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       }
       if (url === "https://cognee.example.invalid/api/v1/memify") {
@@ -2275,25 +3207,21 @@ describe("obsidian-livesync-cognee controller", () => {
       if (url.includes("_changes")) {
         changesCalls += 1;
         if (changesCalls === 1) {
-          const pending = (async () => {
+          return new Promise<Response>((_resolve, reject) => {
             if (init?.signal?.aborted) {
               backgroundAbortObserved.resolve();
-              throw new Error("Task cancelled");
+              queueMicrotask(() => reject(new Error("Task cancelled")));
+              return;
             }
-            await new Promise<void>((resolve) => {
-              init?.signal?.addEventListener(
-                "abort",
-                () => {
-                  backgroundAbortObserved.resolve();
-                  resolve();
-                },
-                { once: true },
-              );
-            });
-            throw new Error("Task cancelled");
-          })();
-          void pending.catch(() => undefined);
-          return pending;
+            init?.signal?.addEventListener(
+              "abort",
+              () => {
+                backgroundAbortObserved.resolve();
+                queueMicrotask(() => reject(new Error("Task cancelled")));
+              },
+              { once: true },
+            );
+          });
         }
         await backgroundAbortObserved.promise;
         return new Response(
@@ -2461,6 +3389,102 @@ describe("obsidian-livesync-cognee controller", () => {
     expect(addCalls).toBe(1);
   });
 
+  it("skips Cognee uploads for snapshots with lines beyond the chunking limit and does not retry that revision", async () => {
+    const warnings: string[] = [];
+    const longLine = `prefix-${"A".repeat(9000)}`;
+    const config = createConfig({
+      cognee: {
+        enabled: true,
+        baseUrl: "https://cognee.example.invalid",
+        datasetName: "vault_a",
+        nodeSet: [],
+        cognify: true,
+        downloadHttpLinks: false,
+        maxLinksPerNote: 0,
+        maxLinkBytes: 1024,
+        searchType: "CHUNKS",
+        searchTopK: 4,
+      },
+    });
+    let addCalls = 0;
+
+    global.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.includes("_changes")) {
+        return new Response(
+          JSON.stringify({
+            results: [
+              {
+                seq: "1-g1",
+                id: "daily/note.md",
+                doc: {
+                  _id: "daily/note.md",
+                  _rev: "1-a",
+                  path: "daily/note.md",
+                  type: "plain",
+                  datatype: "plain",
+                  data: [`${longLine}\n`],
+                  children: [],
+                  ctime: 1,
+                  mtime: 2,
+                  size: longLine.length + 1,
+                  eden: {},
+                },
+              },
+            ],
+            last_seq: "1-g1",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("daily%2Fnote.md?conflicts=true")) {
+        return new Response(
+          JSON.stringify({
+            _id: "daily/note.md",
+            _rev: "1-a",
+            path: "daily/note.md",
+            type: "plain",
+            datatype: "plain",
+            data: [`${longLine}\n`],
+            children: [],
+            ctime: 1,
+            mtime: 2,
+            size: longLine.length + 1,
+            eden: {},
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "https://cognee.example.invalid/api/v1/add") {
+        addCalls += 1;
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url === "https://cognee.example.invalid/api/v1/cognify") {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      throw new Error(`unexpected url ${url}`);
+    }) as typeof fetch;
+
+    const controller = new ObsidianLivesyncCogneeController({
+      config,
+      logger: { info() {}, warn(message: string) { warnings.push(message); }, error() {} },
+      resolvePath: (value) => value,
+      stateDir: tempDir,
+    });
+
+    const firstSync = await controller.syncVault("vault-a", { trigger: "manual", requestedBy: "tool" });
+    const secondSync = await controller.syncVault("vault-a", {
+      forceFull: true,
+      trigger: "manual",
+      requestedBy: "tool",
+    });
+
+    expect(firstSync.cogneeUploads).toBe(0);
+    expect(secondSync.cogneeUploads).toBe(0);
+    expect(addCalls).toBe(0);
+    expect(warnings.filter((message) => message.includes("exceeds Cognee chunking limit 8191"))).toHaveLength(1);
+  });
+
   it("writes full snapshots locally and uploads full version documents for later revisions", async () => {
     const uploadedDocuments: string[] = [];
     let syncRound = 0;
@@ -2607,7 +3631,7 @@ describe("obsidian-livesync-cognee controller", () => {
           { status: 200 },
         );
       }
-      if (url.endsWith("daily%2F2026-03-08%20%40kevin%20launch-plan.md?conflicts=true")) {
+      if (url.endsWith("daily%2F2026-03-08%20%40kevin%20Launch-Plan.md?conflicts=true")) {
         return new Response(
           JSON.stringify({
             _id: "daily/2026-03-08 @kevin Launch-Plan.md",
