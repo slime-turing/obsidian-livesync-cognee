@@ -204,7 +204,9 @@ plugins:
 
 In this mapping, each key under `datasetNames` is an OpenClaw agent id and each value is the Cognee dataset name that agent should use. A vault-level `cognee.datasetName` should match either one of those agent dataset names or the shared default `datasetName`.
 
-When you configure an encrypted LiveSync vault, keep the copied setup URI and its transport passphrase out of tracked files. Prefer environment expansion or your secret manager, and commit only placeholder variable names such as `OBSIDIAN_LIVESYNC_SETUP_URI` and `OBSIDIAN_LIVESYNC_SETUP_URI_PASSPHRASE`.
+For encrypted or path-obfuscated LiveSync vaults, prefer `setupUri` plus `setupUriPassphrase` over manually copying CouchDB, passphrase, and obfuscation fields into config. That keeps the transport settings, E2EE passphrase, path-obfuscation flag, and filename-case behavior aligned with the upstream LiveSync export.
+
+Keep the copied setup URI and its transport passphrase out of tracked files. Prefer environment expansion or your secret manager, and commit only placeholder variable names such as `OBSIDIAN_LIVESYNC_SETUP_URI` and `OBSIDIAN_LIVESYNC_SETUP_URI_PASSPHRASE`.
 
 Example using shell environment variables:
 
@@ -494,9 +496,13 @@ The repair path:
 
 ### Encrypted or obfuscated LiveSync content
 
-Encrypted LiveSync vaults should be configured with `setupUri` and `setupUriPassphrase` so the CouchDB and E2EE settings stay bundled exactly as upstream generated them.
+Encrypted or path-obfuscated LiveSync vaults should be configured with `setupUri` and `setupUriPassphrase` so the CouchDB and E2EE settings stay bundled exactly as upstream generated them.
 
-The plugin accepts both the older fixed-salt LiveSync setup URI payloads and the newer `%$` payloads produced by current Obsidian LiveSync setup flows, including values copied from the mobile UI's `Setup` -> `To setup other devices` -> `Copy the current settings to a setup URI` action.
+Current encrypted-vault support covers the important upstream shapes this bridge needs in practice:
+
+- setup URI import for both the older LiveSync V2 AES-256-GCM payloads and the newer HKDF-salted AES-256-GCM payloads
+- decoded config import for CouchDB URL, database, credentials, LiveSync passphrase, path obfuscation, and filename case handling
+- read-only sync for upstream-compatible HKDF-encrypted metadata, encrypted chunk docs, and encrypted `eden` payloads
 
 Writeback is not attempted when LiveSync passphrase encryption or path obfuscation is enabled. Supported encrypted read shapes are mirrored locally, and unsupported encrypted shapes are skipped and reported.
 
@@ -536,7 +542,7 @@ docker run -d --rm --name obsidian-livesync-couchdb-test \
 
 Then create a test database, insert a plain LiveSync-style note, run `openclaw obsidian-vault sync --vault <id>`, delete the local mirror folder, and verify `openclaw obsidian-vault repair --vault <id> --rebuild-snapshots` restores the local state from CouchDB.
 
-For setup-URI based encrypted vaults, generate the URI with the upstream helper:
+For setup-URI based encrypted or obfuscated vaults, generate the URI with the upstream helper:
 
 ```bash
 export hostname=https://couchdb.example.net

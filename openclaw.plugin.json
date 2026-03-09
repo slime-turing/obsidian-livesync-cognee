@@ -6,11 +6,11 @@
       "label": "Vault ID"
     },
     "vaults.*.setupUri": {
-      "label": "LiveSync Setup URI",
+      "label": "LiveSync Setup URI (Encrypted Vault Import)",
       "advanced": true
     },
     "vaults.*.setupUriPassphrase": {
-      "label": "Setup URI Passphrase",
+      "label": "Setup URI Transport Passphrase",
       "sensitive": true,
       "advanced": true
     },
