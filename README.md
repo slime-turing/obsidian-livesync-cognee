@@ -294,6 +294,34 @@ agents:
             deny: []
 ```
 
+If the agent uses `profile: minimal`, prefer `alsoAllow` for the normal tool policy. The minimal profile only keeps the core minimal tool set; it does not automatically include plugin tools.
+
+Do not set `allow` and `alsoAllow` together in the same tool-policy scope. In OpenClaw, `alsoAllow` is the additive option for profile-based setups such as `profile: minimal`.
+
+Minimal-profile example:
+
+```yaml
+agents:
+  list:
+    - id: lexi
+      sandbox:
+        mode: all
+        workspaceAccess: rw
+      tools:
+        profile: minimal
+        alsoAllow:
+          - obsidian_vault_status
+          - obsidian_vault_read
+          - obsidian_vault_deep_graph_search
+```
+
+That pattern matters because:
+
+- `tools.alsoAllow` or `agents.list[].tools.alsoAllow` adds plugin tools on top of the selected profile
+- `agents.list[].tools.allow` replaces the profile-derived allowlist instead of extending it
+
+If your OpenClaw deployment also uses an explicit sandbox tool allowlist, add the same plugin tool names there too under either `tools.sandbox.tools.allow` or `agents.list[].tools.sandbox.tools.allow`.
+
 Global example using `tools.sandbox.tools.allow`:
 
 ```yaml
