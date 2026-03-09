@@ -30,21 +30,31 @@
     "src/cli.ts",
     "src/config.ts",
     "src/controller.ts",
+    "src/setup-uri.ts",
     "src/tools.ts",
     "src/types.ts"
   ],
   "scripts": {
     "check": "tsc --noEmit",
+    "lint": "npm run lint:code && npm run lint:docs",
+    "lint:code": "eslint . --max-warnings=0",
+    "lint:docs": "markdownlint-cli2 \"**/*.md\" \"!node_modules/**\"",
     "test": "vitest run"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.3.2 <2027.0.0"
+    "openclaw": ">=2026.3.8 <2027.0.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^25.3.3",
     "commander": "^14.0.3",
-    "openclaw": "2026.3.2",
+    "eslint": "^10.0.3",
+    "globals": "^17.4.0",
+    "markdownlint-cli2": "^0.21.0",
+    "openclaw": "2026.3.8",
+    "testcontainers": "^11.12.0",
     "typescript": "^5.9.3",
+    "typescript-eslint": "^8.56.1",
     "vitest": "^4.0.18"
   },
   "openclaw": {
@@ -56,5 +66,8 @@
       "localPath": "obsidian-livesync-cognee",
       "defaultChoice": "npm"
     }
+  },
+  "dependencies": {
+    "octagonal-wheels": "^0.1.45"
   }
 }

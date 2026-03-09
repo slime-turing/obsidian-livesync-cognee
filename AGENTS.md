@@ -1,4 +1,4 @@
-## Repository Guardrails
+# Repository Guardrails
 
 - Before any `git add`, `git commit`, `git tag`, `git push`, or `npm publish`, audit the effective shipped content, not just the edited diff.
 - Scan git-visible files for local/private data such as loopback or LAN IPs, localhost endpoints, home-directory paths, local clone paths, tokens, secrets, passwords, auth headers, machine-specific config, and private env var names or values.

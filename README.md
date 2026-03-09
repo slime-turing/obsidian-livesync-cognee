@@ -162,11 +162,9 @@ plugins:
       config:
         vaults:
           - id: team-notes
-            url: https://couchdb.example.net
-            database: obsidian-team-notes
-            username: ${COUCHDB_USER}
-            password: ${EXAMPLE_COUCHDB_PASSWORD}
-            mode: read-write
+            setupUri: ${OBSIDIAN_LIVESYNC_SETUP_URI}
+            setupUriPassphrase: ${OBSIDIAN_LIVESYNC_SETUP_URI_PASSPHRASE}
+            mode: read-only
             syncMode: changes
             pollIntervalSeconds: 120
             requestTimeoutMs: 15000
@@ -205,6 +203,13 @@ plugins:
 ```
 
 In this mapping, each key under `datasetNames` is an OpenClaw agent id and each value is the Cognee dataset name that agent should use. A vault-level `cognee.datasetName` should match either one of those agent dataset names or the shared default `datasetName`.
+
+If you want `includeGlobs` to allow every synced note path at any folder depth, use `**`:
+
+```yaml
+includeGlobs:
+  - "**"
+```
 
 ### Tool gating
 
@@ -271,8 +276,7 @@ If the sandbox allowlist omits these plugin tools, the model may only see the de
 
 This plugin depends on a specific subset of CouchDB, Obsidian LiveSync, and Cognee API behavior. Operators should treat protocol compatibility as explicit, not automatic.
 
-- the implementation was learned from local upstream source clones of Obsidian LiveSync and CouchDB
-- the Cognee side was learned from local upstream source clones of Cognee and the Cognee OpenClaw integration
+- the implementation tracks protocol behavior exposed by [Obsidian LiveSync](https://github.com/vrtmrz/obsidian-livesync), [Apache CouchDB](https://github.com/apache/couchdb), [Cognee](https://github.com/topoteretes/cognee), and [Cognee Integrations](https://github.com/topoteretes/cognee-integrations)
 - the current recorded baselines are Obsidian LiveSync `0.25.48-1-g09115df`, CouchDB `3.5.0-440-g0d8340c76`, Cognee `v0.5.3-4-gbad3f309`, and Cognee Integrations `openclaw-v2026.2.4-12-g10ac3f3`
 - if LiveSync changes note ids, note document shapes, chunk layout, conflict behavior, or obfuscation rules, this plugin may need updates
 - if CouchDB changes the endpoint behavior this plugin relies on, this plugin may need updates
@@ -288,7 +292,7 @@ Use [docs/protocol-compatibility.md](./docs/protocol-compatibility.md) for the f
 
 1. Poll CouchDB using `_changes?include_docs=true`.
 2. Filter note paths through `includeGlobs` and `excludeGlobs`.
-3. Reject unsupported encrypted or path-obfuscated note shapes.
+3. Decode supported encrypted or obfuscated note shapes and report unsupported ones.
 4. Detect conflicts before mirroring the winning revision.
 5. Mirror note content locally.
 6. Write an append-only snapshot.
@@ -465,7 +469,9 @@ The repair path:
 
 ### Encrypted or obfuscated LiveSync content
 
-Writeback is not attempted when LiveSync passphrase encryption or path obfuscation is enabled. Unsupported encrypted shapes are skipped and reported.
+Encrypted LiveSync vaults should be configured with `setupUri` and `setupUriPassphrase` so the CouchDB and E2EE settings stay bundled exactly as upstream generated them.
+
+Writeback is not attempted when LiveSync passphrase encryption or path obfuscation is enabled. Supported encrypted read shapes are mirrored locally, and unsupported encrypted shapes are skipped and reported.
 
 ### Non-plain note encodings
 
@@ -502,6 +508,33 @@ docker run -d --rm --name obsidian-livesync-couchdb-test \
 ```
 
 Then create a test database, insert a plain LiveSync-style note, run `openclaw obsidian-vault sync --vault <id>`, delete the local mirror folder, and verify `openclaw obsidian-vault repair --vault <id> --rebuild-snapshots` restores the local state from CouchDB.
+
+For setup-URI based encrypted vaults, generate the URI with the upstream helper:
+
+```bash
+export hostname=https://couchdb.example.net
+export database=obsidian-team-notes
+export username=obsidian_user
+export password=super-secret
+export passphrase=vault-e2ee-passphrase
+export uri_passphrase=typed-separately
+deno run -A https://raw.githubusercontent.com/vrtmrz/obsidian-livesync/main/utils/flyio/generate_setupuri.ts
+```
+
+Then pass the emitted setup URI and its separate transport passphrase into this plugin:
+
+```yaml
+plugins:
+  entries:
+    obsidian-livesync-cognee:
+      enabled: true
+      config:
+        vaults:
+          - id: team-notes
+            setupUri: ${OBSIDIAN_LIVESYNC_SETUP_URI}
+            setupUriPassphrase: ${OBSIDIAN_LIVESYNC_SETUP_URI_PASSPHRASE}
+            mode: read-only
+```
 
 Before reporting sync bugs, compare your LiveSync, CouchDB, and Cognee versions against [docs/protocol-compatibility.md](./docs/protocol-compatibility.md) so protocol drift is visible up front.
 

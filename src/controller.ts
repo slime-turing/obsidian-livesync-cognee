@@ -1,6 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { decrypt as decryptLegacy, isPathProbablyObfuscated } from "octagonal-wheels/encryption/encryption";
+import {
+  decrypt as decryptHkdf,
+  decryptWithEphemeralSalt,
+} from "octagonal-wheels/encryption/hkdf";
 import type { PluginLogger } from "openclaw/plugin-sdk";
 import type {
   CogneeMemoryResult,
@@ -34,7 +39,11 @@ const STATE_VERSION = 1;
 const PLUGIN_DIR = path.join("plugins", "obsidian-livesync-cognee");
 const AUTOMATION_TRIGGER_GRACE_MS = 1000;
 const COGNEE_MUTATION_TIMEOUT_MS = 60_000;
-const COGNEE_MEMIFY_TIMEOUT_MS = 120_000;
+const COGNEE_MEMIFY_TIMEOUT_MS = 1_000;
+const ENCRYPTED_META_PREFIX = "/\\:";
+const EDEN_ENCRYPTED_KEY = "h:++encrypted";
+const EDEN_ENCRYPTED_KEY_HKDF = "h:++encrypted-hkdf";
+const SYNC_PARAMETERS_DOC_ID = "_local/obsidian_livesync_sync_parameters";
 
 type ControllerNotifyParams = {
   sessionKey: string;
@@ -62,6 +71,19 @@ type ConflictBundle = {
   conflicts: RevisionContent[];
 };
 
+type CogneeMemifyRunResult = {
+  memified: boolean;
+  pending?: boolean;
+  status?: string;
+  pipelineRunId?: string;
+  checkHint?: string;
+};
+
+type OpenRevisionEntry = {
+  ok?: CouchNoteDoc;
+  missing?: string;
+};
+
 type SearchApiResult = {
   search_result?: string | string[] | Array<Record<string, unknown>>;
   dataset_id?: string;
@@ -70,6 +92,22 @@ type SearchApiResult = {
   text?: string;
   score?: number;
   metadata?: Record<string, unknown>;
+};
+
+type DecryptedMetaProps = {
+  path: string;
+  mtime: number;
+  ctime: number;
+  size: number;
+  children?: string[];
+};
+
+type CouchSyncParametersDoc = {
+  _id: string;
+  _rev?: string;
+  type?: string;
+  protocolVersion?: number;
+  pbkdf2salt?: string;
 };
 
 type ActiveVaultTask = {
@@ -366,6 +404,7 @@ export class ObsidianLivesyncCogneeController {
   private readonly cogneeAuthTokens = new Map<string, string>();
   private readonly cogneeLoginInFlight = new Map<string, Promise<string>>();
   private readonly activeTasks = new Map<string, ActiveVaultTask>();
+  private readonly replicationSaltCache = new Map<string, Promise<Uint8Array<ArrayBuffer>>>();
   private initialized = false;
 
   constructor(options: ControllerOptions) {
@@ -584,12 +623,7 @@ export class ObsidianLivesyncCogneeController {
     await this.initialise();
     return this.runExclusive(vaultId, async () => {
       const vault = this.requireVault(vaultId);
-      if (vault.mode !== "read-write") {
-        throw new Error(`vault ${vaultId} is read-only`);
-      }
-      if (vault.passphrase || vault.usePathObfuscation) {
-        throw new Error(`vault ${vaultId} uses unsupported LiveSync encryption/obfuscation for writeback`);
-      }
+      this.assertVaultWritebackCompatible(vault, vaultId);
 
       const docId = pathToDocumentId(vault, notePath);
       const existing = await this.tryGetDoc(vault, docId);
@@ -641,6 +675,7 @@ export class ObsidianLivesyncCogneeController {
     await this.initialise();
     return this.runExclusive(vaultId, async () => {
       const vault = this.requireVault(vaultId);
+      this.assertVaultWritebackCompatible(vault, vaultId);
       const currentDoc = await this.fetchConflictProbeByPath(vault, notePath);
       const bundle = await this.fetchConflictBundle(vault, currentDoc);
       if (!bundle || bundle.conflicts.length === 0) {
@@ -755,12 +790,18 @@ export class ObsidianLivesyncCogneeController {
       if (automation.minIntervalSeconds > 0 && lastRunAt) {
         const elapsedMs = Date.now() - Date.parse(lastRunAt);
         if (Number.isFinite(elapsedMs) && elapsedMs < automation.minIntervalSeconds * 1000) {
+            this.logger.warn(
+              `obsidian-livesync-cognee: skipped ${params.trigger} automation for vault=${vault.id} because the previous memify run finished ${elapsedMs}ms ago, below minIntervalSeconds=${automation.minIntervalSeconds}`,
+            );
           continue;
         }
       }
       if (lastRunAt) {
         const elapsedMs = Date.now() - Date.parse(lastRunAt);
         if (Number.isFinite(elapsedMs) && elapsedMs < Math.max(automation.minIntervalSeconds * 1000, AUTOMATION_TRIGGER_GRACE_MS)) {
+            this.logger.warn(
+              `obsidian-livesync-cognee: skipped ${params.trigger} automation for vault=${vault.id} because the previous memify run finished ${elapsedMs}ms ago, below graceWindowMs=${Math.max(automation.minIntervalSeconds * 1000, AUTOMATION_TRIGGER_GRACE_MS)}`,
+            );
           continue;
         }
       }
@@ -1187,19 +1228,26 @@ export class ObsidianLivesyncCogneeController {
       await this.writeState();
 
       this.throwIfCancelled(task.signal);
-      const memified = snapshotPaths.length > 0 ? await this.runCogneeMemify(vault, target, task.signal) : false;
+      const memifyResult = snapshotPaths.length > 0
+        ? await this.runCogneeMemify(vault, target, task.signal)
+        : { memified: false };
       runtime.memify = {
         ...runtime.memify,
         status: "succeeded",
         finishedAt: new Date().toISOString(),
         snapshotsConsidered: snapshotPaths.length,
-        memified,
+        memified: memifyResult.memified,
       };
       await this.writeState();
       if (options.automated && automation.notifyOnSuccess) {
+        const memifySummary = memifyResult.pending
+          ? `queued a background Cognee memify run${memifyResult.pipelineRunId ? ` (${memifyResult.pipelineRunId})` : ""}`
+          : memifyResult.memified
+            ? "ran Cognee memify"
+            : "skipped memify because no snapshots were staged locally";
         this.notifyMemify(
           vault,
-          `Vault ${vault.id}: ${options.trigger ?? "manual"} memify run finished. Considered ${snapshotPaths.length} local snapshots and ${memified ? "ran Cognee memify" : "skipped memify because no snapshots were staged locally"}.`,
+          `Vault ${vault.id}: ${options.trigger ?? "manual"} memify run finished. Considered ${snapshotPaths.length} local snapshots and ${memifySummary}.`,
           options.sessionKey,
           `vault:${vault.id}:memify:success`,
         );
@@ -1207,7 +1255,11 @@ export class ObsidianLivesyncCogneeController {
       return {
         vaultId,
         snapshotsConsidered: snapshotPaths.length,
-        memified,
+        memified: memifyResult.memified,
+        pending: memifyResult.pending,
+        status: memifyResult.status,
+        pipelineRunId: memifyResult.pipelineRunId,
+        checkHint: memifyResult.checkHint,
         datasetId: target.datasetId,
         datasetName: target.datasetName,
       };
@@ -1414,9 +1466,23 @@ export class ObsidianLivesyncCogneeController {
           this.throwIfCancelled(task.signal);
         }
         stats.changesSeen += 1;
-        const doc = row.doc as CouchNoteDoc | undefined;
+        const rawDoc = row.doc as CouchNoteDoc | undefined;
         const trackedNoteState = this.findTrackedNoteStateByDocId(runtime, row.id);
-        const deleted = Boolean(row.deleted || doc?.deleted || doc?._deleted);
+        const deleted = Boolean(row.deleted || rawDoc?.deleted || rawDoc?._deleted);
+        let doc = rawDoc;
+        if (!deleted && doc && this.isNoteDoc(doc)) {
+          try {
+            doc = await this.decodeNoteDoc(vault, doc);
+          } catch (error) {
+            stats.unsupportedEntries += 1;
+            const noteHint = doc.path ?? doc._id;
+            this.notifyVault(vault, `Vault ${vault.id}: failed to decode encrypted note at ${noteHint}. ${String(error)}`, {
+              kind: "error",
+              contextKey: `vault:${vault.id}:decode:${doc._id}`,
+            });
+            continue;
+          }
+        }
         const currentPath = doc?.path ?? trackedNoteState?.path;
         if (!deleted) {
           if (!doc || !this.isNoteDoc(doc) || !doc.path) {
@@ -1429,14 +1495,6 @@ export class ObsidianLivesyncCogneeController {
           continue;
         }
         const noteDoc = deleted ? undefined : (doc as CouchNoteDoc);
-        if (noteDoc && this.isUnsupportedEncryptedDoc(noteDoc)) {
-          stats.unsupportedEntries += 1;
-          this.notifyVault(vault, `Vault ${vault.id}: unsupported encrypted or obfuscated note encountered at ${noteDoc.path}.`, {
-            kind: "error",
-            contextKey: `vault:${vault.id}:unsupported:${noteDoc.path}`,
-          });
-          continue;
-        }
 
         let currentDoc = doc;
         if (noteDoc?.path) {
@@ -1797,9 +1855,9 @@ export class ObsidianLivesyncCogneeController {
     vault: ResolvedVaultConfig,
     target: ResolvedVaultConfig["cognee"],
     signal?: AbortSignal,
-  ): Promise<boolean> {
+  ): Promise<CogneeMemifyRunResult> {
     if (!target.enabled || !target.baseUrl) {
-      return false;
+      return { memified: false };
     }
 
     const memifyPayload: Record<string, unknown> = target.datasetId
@@ -1808,6 +1866,40 @@ export class ObsidianLivesyncCogneeController {
     if (target.nodeSet.length > 0) {
       memifyPayload.node_name = target.nodeSet;
     }
+    try {
+      const backgroundResponse = await this.fetchCogneeJson<unknown>(
+        target,
+        "/api/v1/memify",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...memifyPayload, run_in_background: true }),
+          signal,
+        },
+        COGNEE_MEMIFY_TIMEOUT_MS,
+      );
+      const backgroundRun = this.extractCogneeBackgroundRun(backgroundResponse);
+      if (backgroundRun) {
+        return {
+          memified: false,
+          pending: true,
+          status: backgroundRun.status,
+          pipelineRunId: backgroundRun.pipelineRunId,
+          checkHint: backgroundRun.pipelineRunId
+            ? `Cognee accepted the memify run in background. Track pipeline_run_id ${backgroundRun.pipelineRunId} from Cognee, then rerun this command or inspect Cognee progress.`
+            : "Cognee accepted the memify run in background. Rerun this command later or inspect Cognee progress.",
+        };
+      }
+      return { memified: true };
+    } catch (error) {
+      if (!this.isCogneeBackgroundMemifyCompatibilityError(error)) {
+        throw error;
+      }
+      this.logger.warn(
+        `obsidian-livesync-cognee: background Cognee memify fallback for vault=${vault.id} because the target rejected background execution: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
     await this.fetchCogneeJson<Record<string, unknown>>(
       target,
       "/api/v1/memify",
@@ -1817,9 +1909,38 @@ export class ObsidianLivesyncCogneeController {
         body: JSON.stringify(memifyPayload),
         signal,
       },
-      this.getCogneeTimeoutMs(vault, COGNEE_MEMIFY_TIMEOUT_MS),
+      COGNEE_MEMIFY_TIMEOUT_MS,
     );
-    return true;
+    return { memified: true };
+  }
+
+  private extractCogneeBackgroundRun(
+    response: unknown,
+  ): { status?: string; pipelineRunId?: string } | undefined {
+    if (!response || typeof response !== "object") {
+      return undefined;
+    }
+    const entries = Object.values(response as Record<string, unknown>);
+    const candidate = (entries[0] ?? response) as Record<string, unknown>;
+    if (!candidate || typeof candidate !== "object") {
+      return undefined;
+    }
+    const status = typeof candidate.status === "string" ? candidate.status : undefined;
+    const pipelineRunId =
+      typeof candidate.pipeline_run_id === "string"
+        ? candidate.pipeline_run_id
+        : typeof candidate.pipelineRunId === "string"
+          ? candidate.pipelineRunId
+          : undefined;
+    if (!status && !pipelineRunId) {
+      return undefined;
+    }
+    return { status, pipelineRunId };
+  }
+
+  private isCogneeBackgroundMemifyCompatibilityError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /UUID' object is not iterable|HTTP 409 .*\/api\/v1\/memify/i.test(message);
   }
 
   private getCogneeTimeoutMs(vault: ResolvedVaultConfig, minimumMs: number): number {
@@ -2019,7 +2140,8 @@ export class ObsidianLivesyncCogneeController {
     notePath: string,
   ): Promise<{ doc: CouchNoteDoc; content: string; deleted: boolean }> {
     const docId = pathToDocumentId(vault, notePath);
-    const doc = await this.fetchJson<CouchNoteDoc>(vault, `/${encodeURIComponent(docId)}`);
+    const rawDoc = await this.fetchJson<CouchNoteDoc>(vault, `/${encodeURIComponent(docId)}`);
+    const doc = await this.decodeNoteDoc(vault, rawDoc);
     if (!this.isNoteDoc(doc)) {
       throw new Error(`document at ${notePath} is not a note`);
     }
@@ -2035,20 +2157,27 @@ export class ObsidianLivesyncCogneeController {
   }
 
   private async loadNoteContent(vault: ResolvedVaultConfig, doc: CouchNoteDoc): Promise<string | null> {
-    if (Array.isArray(doc.data)) {
-      return doc.data.join("");
+    const readableDoc = await this.decodeNoteDoc(vault, doc);
+    if (Array.isArray(readableDoc.data)) {
+      return readableDoc.data.join("");
     }
-    if (typeof doc.data === "string") {
-      return doc.data;
+    if (typeof readableDoc.data === "string") {
+      return readableDoc.data;
     }
-    if (doc.children && doc.children.length > 0) {
+    if (readableDoc.children && readableDoc.children.length > 0) {
       const pieces: string[] = [];
-      for (const childId of doc.children) {
+      for (const childId of readableDoc.children) {
+        const edenChunk = readableDoc.eden?.[childId]?.data;
+        if (typeof edenChunk === "string") {
+          pieces.push(edenChunk);
+          continue;
+        }
         const chunk = await this.fetchJson<CouchLeafDoc>(vault, `/${encodeURIComponent(childId)}`);
-        if (!chunk || chunk.type !== "leaf" || typeof chunk.data !== "string") {
+        const readableChunk = await this.decodeLeafDoc(vault, chunk);
+        if (!readableChunk || readableChunk.type !== "leaf" || typeof readableChunk.data !== "string") {
           return null;
         }
-        pieces.push(chunk.data);
+        pieces.push(readableChunk.data);
       }
       return pieces.join("");
     }
@@ -2057,16 +2186,6 @@ export class ObsidianLivesyncCogneeController {
 
   private isNoteDoc(doc: CouchNoteDoc | CouchLeafDoc): doc is CouchNoteDoc {
     return (doc.type === "plain" || doc.type === "newnote") && typeof (doc as CouchNoteDoc).path === "string";
-  }
-
-  private isUnsupportedEncryptedDoc(doc: CouchNoteDoc): boolean {
-    if (doc._id.startsWith("f:") && !doc.path) {
-      return true;
-    }
-    if (typeof doc.path === "string" && doc.path.startsWith("/\\:")) {
-      return true;
-    }
-    return false;
   }
 
   private async fetchChanges(
@@ -2112,10 +2231,11 @@ export class ObsidianLivesyncCogneeController {
       if (!doc._rev || loaded.has(doc._rev)) {
         return;
       }
+      const readableDoc = await this.decodeNoteDoc(vault, doc);
       loaded.set(doc._rev, {
-        doc,
+        doc: readableDoc,
         rev: doc._rev,
-        content: doc.deleted || doc._deleted ? "" : await this.loadNoteContent(vault, doc),
+        content: doc.deleted || doc._deleted ? "" : await this.loadNoteContent(vault, readableDoc),
         deleted: Boolean(doc.deleted || doc._deleted),
       });
     };
@@ -2131,14 +2251,20 @@ export class ObsidianLivesyncCogneeController {
     if (!current) {
       return null;
     }
-    const conflicts = conflictRevs.map((rev) => loaded.get(rev)).filter((entry): entry is RevisionContent => Boolean(entry));
+    const explicitConflicts = conflictRevs
+      .map((rev) => loaded.get(rev))
+      .filter((entry): entry is RevisionContent => Boolean(entry));
+    const conflicts =
+      explicitConflicts.length > 0
+        ? explicitConflicts
+        : Array.from(loaded.values()).filter((entry) => entry.rev !== currentRev);
     return { current, conflicts };
   }
 
   private async fetchOpenRevisionBundle(
     vault: ResolvedVaultConfig,
     docId: string,
-  ): Promise<Array<{ ok?: CouchNoteDoc; missing?: string }>> {
+  ): Promise<OpenRevisionEntry[]> {
     const url = `${vault.url}/${encodeURIComponent(vault.database)}/${encodeURIComponent(docId)}?open_revs=all`;
     const response = await this.fetchAbsoluteResponse(url, {
       headers: this.buildVaultHeaders(vault),
@@ -2150,7 +2276,7 @@ export class ObsidianLivesyncCogneeController {
     }
     const contentType = response.headers.get("content-type") ?? "";
     if (contentType.includes("application/json") || /^[\s]*[[{]/.test(text)) {
-      return JSON.parse(text) as Array<{ ok?: CouchNoteDoc; missing?: string }>;
+      return (JSON.parse(text) as unknown[]).map((entry) => this.normalizeOpenRevisionEntry(entry));
     }
     if (!contentType.includes("multipart/mixed")) {
       throw new Error(`unsupported open_revs response type: ${contentType || "unknown"}`);
@@ -2163,13 +2289,20 @@ export class ObsidianLivesyncCogneeController {
     if (!boundary) {
       throw new Error("multipart open_revs response boundary was empty");
     }
-    return this.parseMultipartJsonParts(text, boundary)
-      .map((entry) => {
-        if (entry && typeof entry === "object") {
-          return entry as { ok?: CouchNoteDoc; missing?: string };
-        }
-        return { missing: String(entry) };
-      });
+    return this.parseMultipartJsonParts(text, boundary).map((entry) => this.normalizeOpenRevisionEntry(entry));
+  }
+
+  private normalizeOpenRevisionEntry(entry: unknown): OpenRevisionEntry {
+    if (entry && typeof entry === "object") {
+      const objectEntry = entry as Record<string, unknown>;
+      if ("ok" in objectEntry || "missing" in objectEntry) {
+        return objectEntry as OpenRevisionEntry;
+      }
+      if (typeof objectEntry._id === "string" && typeof objectEntry._rev === "string") {
+        return { ok: objectEntry as CouchNoteDoc };
+      }
+    }
+    return { missing: String(entry) };
   }
 
   private parseMultipartJsonParts(payload: string, boundary: string): unknown[] {
@@ -2191,12 +2324,16 @@ export class ObsidianLivesyncCogneeController {
     notePath: string,
   ): Promise<{ currentDoc?: CouchNoteDoc; conflictDetected: boolean; autoResolved: boolean }> {
     const probe = await this.fetchConflictProbeByPath(vault, notePath);
+    const readableProbe = await this.decodeNoteDoc(vault, probe);
     const bundle = await this.fetchConflictBundle(vault, probe);
     if (!bundle || bundle.conflicts.length === 0) {
-      return { currentDoc: probe, conflictDetected: false, autoResolved: false };
+      return { currentDoc: readableProbe, conflictDetected: false, autoResolved: false };
     }
 
-    if (vault.autoResolveConflicts) {
+    if (vault.autoResolveConflicts && this.isVaultWritebackCompatible(vault)) {
+      if ([bundle.current, ...bundle.conflicts].some((entry) => !entry.deleted && entry.content === null)) {
+        return { currentDoc: bundle.current.doc, conflictDetected: true, autoResolved: false };
+      }
       const signatures = [bundle.current, ...bundle.conflicts].map((entry) =>
         normalizeConflictComparableContent(entry.content, entry.deleted),
       );
@@ -2217,7 +2354,7 @@ export class ObsidianLivesyncCogneeController {
           kind: "conflict",
           contextKey: `vault:${vault.id}:conflict:auto:${notePath}`,
         });
-        return { currentDoc: probe, conflictDetected: true, autoResolved: true };
+        return { currentDoc: bundle.current.doc, conflictDetected: true, autoResolved: true };
       }
     }
 
@@ -2231,7 +2368,7 @@ export class ObsidianLivesyncCogneeController {
         contextKey: `vault:${vault.id}:conflict:${notePath}`,
       },
     );
-    return { currentDoc: probe, conflictDetected: true, autoResolved: false };
+    return { currentDoc: bundle.current.doc, conflictDetected: true, autoResolved: false };
   }
 
   private buildConflictState(currentDoc: CouchNoteDoc, bundle: ConflictBundle): StoredConflictState {
@@ -2247,7 +2384,7 @@ export class ObsidianLivesyncCogneeController {
           : buildDiffPreview(bundle.current.content, entry.deleted ? null : entry.content),
     }));
     return {
-      path: currentDoc.path ?? currentDoc._id,
+      path: bundle.current.doc.path ?? currentDoc.path ?? currentDoc._id,
       docId: currentDoc._id,
       winnerRev: currentDoc._rev,
       revisions,
@@ -2303,6 +2440,131 @@ export class ObsidianLivesyncCogneeController {
       },
       timeoutMs: vault.requestTimeoutMs,
     } as RequestInit & { timeoutMs?: number });
+  }
+
+  private async decodeNoteDoc(vault: ResolvedVaultConfig, doc: CouchNoteDoc): Promise<CouchNoteDoc> {
+    const readableDoc: CouchNoteDoc = {
+      ...doc,
+      children: doc.children ? [...doc.children] : doc.children,
+      eden: doc.eden ? { ...doc.eden } : doc.eden,
+    };
+
+    if (typeof readableDoc.path === "string") {
+      if (readableDoc.path.startsWith(ENCRYPTED_META_PREFIX)) {
+        const metadata = await this.decryptHkdfMetadata(vault, readableDoc.path);
+        readableDoc.path = metadata.path;
+        readableDoc.mtime = metadata.mtime;
+        readableDoc.ctime = metadata.ctime;
+        readableDoc.size = metadata.size;
+        readableDoc.children = metadata.children ?? readableDoc.children;
+      } else if (isPathProbablyObfuscated(readableDoc.path)) {
+        readableDoc.path = await this.tryDecryptLegacyString(vault, readableDoc.path);
+      }
+    }
+
+    if (typeof readableDoc.data === "string" && readableDoc.e_) {
+      readableDoc.data = await this.decryptLiveSyncString(vault, readableDoc.data);
+      delete readableDoc.e_;
+    }
+
+    if (readableDoc.eden && Object.keys(readableDoc.eden).length > 0) {
+      let decryptedEden: Record<string, { data?: string; epoch?: number }> | undefined;
+
+      const legacyEden = readableDoc.eden[EDEN_ENCRYPTED_KEY]?.data;
+      if (typeof legacyEden === "string") {
+        decryptedEden = {
+          ...(decryptedEden ?? readableDoc.eden),
+          ...JSON.parse(await this.tryDecryptLegacyString(vault, legacyEden)) as Record<string, { data?: string; epoch?: number }>,
+        };
+      }
+
+      const hkdfEden = readableDoc.eden[EDEN_ENCRYPTED_KEY_HKDF]?.data;
+      if (typeof hkdfEden === "string") {
+        decryptedEden = {
+          ...(decryptedEden ?? readableDoc.eden),
+          ...JSON.parse(await this.decryptHkdfString(vault, hkdfEden)) as Record<string, { data?: string; epoch?: number }>,
+        };
+      }
+
+      if (decryptedEden) {
+        delete decryptedEden[EDEN_ENCRYPTED_KEY];
+        delete decryptedEden[EDEN_ENCRYPTED_KEY_HKDF];
+        readableDoc.eden = decryptedEden;
+      }
+    }
+
+    return readableDoc;
+  }
+
+  private async decodeLeafDoc(vault: ResolvedVaultConfig, doc: CouchLeafDoc): Promise<CouchLeafDoc> {
+    if (!(typeof doc.data === "string" && doc.e_)) {
+      return doc;
+    }
+    return {
+      ...doc,
+      data: await this.decryptLiveSyncString(vault, doc.data),
+      e_: undefined,
+    };
+  }
+
+  private async decryptLiveSyncString(vault: ResolvedVaultConfig, input: string): Promise<string> {
+    if (input.startsWith("%$")) {
+      return decryptWithEphemeralSalt(input, this.requireVaultPassphrase(vault));
+    }
+    if (input.startsWith("%=")) {
+      return this.decryptHkdfString(vault, input);
+    }
+    return this.tryDecryptLegacyString(vault, input);
+  }
+
+  private async decryptHkdfMetadata(vault: ResolvedVaultConfig, encryptedPath: string): Promise<DecryptedMetaProps> {
+    const decrypted = await this.decryptHkdfString(vault, encryptedPath.slice(ENCRYPTED_META_PREFIX.length));
+    return JSON.parse(decrypted) as DecryptedMetaProps;
+  }
+
+  private async decryptHkdfString(vault: ResolvedVaultConfig, input: string): Promise<string> {
+    return decryptHkdf(input, this.requireVaultPassphrase(vault), await this.getReplicationPbkdf2Salt(vault));
+  }
+
+  private async tryDecryptLegacyString(vault: ResolvedVaultConfig, input: string): Promise<string> {
+    const passphrase = this.requireVaultPassphrase(vault);
+    try {
+      return await decryptLegacy(input, passphrase, false);
+    } catch {
+      return decryptLegacy(input, passphrase, true);
+    }
+  }
+
+  private requireVaultPassphrase(vault: ResolvedVaultConfig): string {
+    if (!vault.passphrase) {
+      throw new Error(`vault ${vault.id} is missing a LiveSync passphrase`);
+    }
+    return vault.passphrase;
+  }
+
+  private async getReplicationPbkdf2Salt(vault: ResolvedVaultConfig): Promise<Uint8Array<ArrayBuffer>> {
+    const cacheKey = `${vault.url}/${vault.database}`;
+    const cached = this.replicationSaltCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const fetchSalt = (async () => {
+      const syncParams = await this.fetchJson<CouchSyncParametersDoc>(
+        vault,
+        `/${encodeURIComponent(SYNC_PARAMETERS_DOC_ID)}`,
+      );
+      if (!syncParams?.pbkdf2salt) {
+        throw new Error(`vault ${vault.id} is missing remote PBKDF2 salt`);
+      }
+      return Uint8Array.from(Buffer.from(syncParams.pbkdf2salt, "base64")) as Uint8Array<ArrayBuffer>;
+    })().catch((error) => {
+      this.replicationSaltCache.delete(cacheKey);
+      throw error;
+    });
+
+    this.replicationSaltCache.set(cacheKey, fetchSalt);
+    return fetchSalt;
   }
 
   private async fetchAbsoluteJson<T>(
@@ -2571,6 +2833,20 @@ export class ObsidianLivesyncCogneeController {
       throw new Error(`unknown vault: ${vaultId}`);
     }
     return vault;
+  }
+
+  private isVaultWritebackCompatible(vault: ResolvedVaultConfig): boolean {
+    return vault.mode === "read-write" && !(vault.encrypt || vault.passphrase || vault.usePathObfuscation);
+  }
+
+  private assertVaultWritebackCompatible(vault: ResolvedVaultConfig, vaultId: string): void {
+    if (vault.mode !== "read-write") {
+      throw new Error(`vault ${vaultId} is read-only`);
+    }
+    if (!this.isVaultWritebackCompatible(vault)) {
+      const sourceHint = vault.configSource === "setup-uri" ? " from setupUri" : "";
+      throw new Error(`vault ${vaultId} uses unsupported LiveSync encryption/obfuscation for writeback${sourceHint}`);
+    }
   }
 
   private async writeState(): Promise<void> {

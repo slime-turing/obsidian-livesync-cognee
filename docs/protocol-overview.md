@@ -24,15 +24,15 @@ If any of those protocol surfaces drift, this plugin may still start, but sync, 
 
 ## Recorded source baselines
 
-This implementation was learned from these local source clones and revisions:
+This implementation was derived from these upstream projects and recorded revisions:
 
-| Source | Local clone | Recorded baseline |
+| Source | Upstream | Recorded baseline |
 | --- | --- | --- |
-| Obsidian LiveSync | local upstream source clone | `0.25.48-1-g09115df` |
-| Apache CouchDB | local upstream source clone | `3.5.0-440-g0d8340c76` |
-| Cognee | local upstream source clone | `v0.5.3-4-gbad3f309` |
-| Cognee Integrations | local upstream source clone | `openclaw-v2026.2.4-12-g10ac3f3` |
-| Cognee OpenClaw integration subtree | local upstream integration subtree | `10ac3f3` |
+| Obsidian LiveSync | [github.com/vrtmrz/obsidian-livesync](https://github.com/vrtmrz/obsidian-livesync) | `0.25.48-1-g09115df` |
+| Apache CouchDB | [github.com/apache/couchdb](https://github.com/apache/couchdb) | `3.5.0-440-g0d8340c76` |
+| Cognee | [github.com/topoteretes/cognee](https://github.com/topoteretes/cognee) | `v0.5.3-4-gbad3f309` |
+| Cognee Integrations | [github.com/topoteretes/cognee-integrations](https://github.com/topoteretes/cognee-integrations) | `openclaw-v2026.2.4-12-g10ac3f3` |
+| Cognee OpenClaw integration subtree | [github.com/topoteretes/cognee-integrations](https://github.com/topoteretes/cognee-integrations) | `10ac3f3` |
 
 These are not marketing compatibility claims. They are the source baselines the current implementation was derived from.
 

@@ -7,6 +7,7 @@ import type {
   VaultNotificationConfig,
   VaultSyncMode,
 } from "./types.js";
+import { decodeSetupUri, isSetupUriFieldPresent } from "./setup-uri.js";
 
 const DEFAULT_POLL_INTERVAL_SECONDS = 300;
 const DEFAULT_TIMEOUT_MS = 20_000;
@@ -311,8 +312,28 @@ function parseVault(
   const label = `vaults[${index}]`;
   const objectValue = asObject(value, label);
   const id = readString(objectValue.id, `${label}.id`, true) as string;
-  const url = readString(objectValue.url, `${label}.url`, true) as string;
-  const database = readString(objectValue.database, `${label}.database`, true) as string;
+  const setupUri = readString(objectValue.setupUri, `${label}.setupUri`);
+  const setupUriPassphrase = readString(objectValue.setupUriPassphrase, `${label}.setupUriPassphrase`);
+  if ((setupUri && !setupUriPassphrase) || (!setupUri && setupUriPassphrase)) {
+    throw new Error(`${label}.setupUri and ${label}.setupUriPassphrase must be provided together`);
+  }
+  const decodedSetupUri = setupUri ? decodeSetupUri(setupUri, setupUriPassphrase as string) : undefined;
+  if (decodedSetupUri) {
+    const conflictingFields = [
+      "url",
+      "database",
+      "username",
+      "password",
+      "passphrase",
+      "usePathObfuscation",
+      "handleFilenameCaseSensitive",
+    ].filter((field) => isSetupUriFieldPresent(objectValue, field));
+    if (conflictingFields.length > 0) {
+      throw new Error(`${label} cannot set ${conflictingFields.join(", ")} when setupUri is used`);
+    }
+  }
+  const url = decodedSetupUri?.url ?? (readString(objectValue.url, `${label}.url`, true) as string);
+  const database = decodedSetupUri?.database ?? (readString(objectValue.database, `${label}.database`, true) as string);
   const modeRaw = readString(objectValue.mode, `${label}.mode`) ?? "read-only";
   if (modeRaw !== "read-only" && modeRaw !== "read-write") {
     throw new Error(`${label}.mode must be read-only or read-write`);
@@ -329,12 +350,14 @@ function parseVault(
 
   return {
     id,
+    configSource: decodedSetupUri ? "setup-uri" : "manual",
     url: url.replace(/\/+$/, ""),
     database,
-    username: readString(objectValue.username, `${label}.username`),
-    password: readString(objectValue.password, `${label}.password`),
+    username: decodedSetupUri?.username ?? readString(objectValue.username, `${label}.username`),
+    password: decodedSetupUri?.password ?? readString(objectValue.password, `${label}.password`),
     headers: {
       ...readHeaders(defaults.headers, "defaults.headers"),
+      ...decodedSetupUri?.headers,
       ...readHeaders(objectValue.headers, `${label}.headers`),
     },
     enabled: readBoolean(objectValue.enabled, true),
@@ -359,9 +382,15 @@ function parseVault(
       objectValue.snapshotRoot ?? defaults.snapshotRoot,
       `${label}.snapshotRoot`,
     ),
-    passphrase: readString(objectValue.passphrase, `${label}.passphrase`),
-    usePathObfuscation: readBoolean(objectValue.usePathObfuscation, false),
-    handleFilenameCaseSensitive: readBoolean(objectValue.handleFilenameCaseSensitive, false),
+    encrypt:
+      decodedSetupUri?.encrypt ??
+      Boolean(readString(objectValue.passphrase, `${label}.passphrase`) || readBoolean(objectValue.usePathObfuscation, false)),
+    passphrase: decodedSetupUri?.passphrase ?? readString(objectValue.passphrase, `${label}.passphrase`),
+    usePathObfuscation: decodedSetupUri?.usePathObfuscation ?? readBoolean(objectValue.usePathObfuscation, false),
+    handleFilenameCaseSensitive:
+      decodedSetupUri?.handleFilenameCaseSensitive ?? readBoolean(objectValue.handleFilenameCaseSensitive, false),
+    e2eeAlgorithm: decodedSetupUri?.e2eeAlgorithm,
+    setupUriSettingVersion: decodedSetupUri?.settingVersion,
     autoResolveConflicts: readBoolean(objectValue.autoResolveConflicts, true),
     notifications,
     automation: {
@@ -444,9 +473,35 @@ export const obsidianLivesyncCogneeConfigSchema: OpenClawPluginConfigSchema = {
         items: {
           type: "object",
           additionalProperties: false,
-          required: ["id", "url", "database"],
+          oneOf: [
+            {
+              required: ["id", "url", "database"],
+              not: {
+                anyOf: [
+                  { required: ["setupUri"] },
+                  { required: ["setupUriPassphrase"] },
+                ],
+              },
+            },
+            {
+              required: ["id", "setupUri", "setupUriPassphrase"],
+              not: {
+                anyOf: [
+                  { required: ["url"] },
+                  { required: ["database"] },
+                  { required: ["username"] },
+                  { required: ["password"] },
+                  { required: ["passphrase"] },
+                  { required: ["usePathObfuscation"] },
+                  { required: ["handleFilenameCaseSensitive"] },
+                ],
+              },
+            },
+          ],
           properties: {
             id: { type: "string" },
+            setupUri: { type: "string" },
+            setupUriPassphrase: { type: "string" },
             url: { type: "string" },
             database: { type: "string" },
             username: { type: "string" },

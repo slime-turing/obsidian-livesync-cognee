@@ -2,8 +2,62 @@ import type { Command } from "commander";
 import type { ObsidianLivesyncCogneeController } from "./controller.js";
 
 function printJson(value: unknown): void {
-  // eslint-disable-next-line no-console
   console.log(JSON.stringify(value, null, 2));
+}
+
+function isMemifyCheckLaterError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /aborterror|aborted|timed out|timeout/i.test(message);
+}
+
+function shellQuote(value: string): string {
+  return /^[A-Za-z0-9._:@/=-]+$/.test(value) ? value : JSON.stringify(value);
+}
+
+function buildMemifyRetryCommand(options: { datasetName?: string; agent?: string; vault?: string; allSnapshots?: boolean }): string {
+  const parts = ["openclaw", "obsidian-vault", "memify"];
+  if (options.datasetName) {
+    parts.push("--dataset-name", shellQuote(options.datasetName));
+  }
+  if (options.vault) {
+    parts.push("--vault", shellQuote(options.vault));
+  }
+  if (options.agent) {
+    parts.push("--agent", shellQuote(options.agent));
+  }
+  if (options.allSnapshots) {
+    parts.push("--all-snapshots");
+  }
+  return parts.join(" ");
+}
+
+function buildMemifyCheckLaterResult(options: {
+  datasetName?: string;
+  matchingVaultIds?: string[];
+  vaultId: string;
+  agent?: string;
+  allSnapshots?: boolean;
+  error: unknown;
+}) {
+  const message = options.error instanceof Error ? options.error.message : String(options.error);
+  return {
+    requestedDatasetName: options.datasetName,
+    matchingVaultIds: options.matchingVaultIds,
+    vaultId: options.vaultId,
+    memified: false,
+    pending: true,
+    status: "check-later",
+    reason: "Cognee memify did not return before the CLI stopped waiting.",
+    error: message,
+    checkHint:
+      "Cognee memify is blocking by default, so the server may still be processing this dataset. Retry the memify command later or inspect the Cognee service logs.",
+    retryCommand: buildMemifyRetryCommand({
+      datasetName: options.datasetName,
+      agent: options.agent,
+      vault: options.datasetName ? undefined : options.vaultId,
+      allSnapshots: options.allSnapshots,
+    }),
+  };
 }
 
 export function registerObsidianLivesyncCogneeCli(params: {
@@ -99,28 +153,60 @@ export function registerObsidianLivesyncCogneeCli(params: {
         if (matchingVaultIds.length === 0) {
           throw new Error(`unknown Cognee dataset for current selection: ${options.datasetName}`);
         }
-        const result = await controller.memifyVault(matchingVaultIds[0] as string, {
-          allSnapshots: options.allSnapshots,
-          trigger: "manual",
-          requestedBy: "cli",
-          agentId: options.agent,
-        });
-        printJson({
-          requestedDatasetName: options.datasetName,
-          matchingVaultIds,
-          ...result,
-        });
-        return;
+        const selectedVaultId = matchingVaultIds[0] as string;
+        try {
+          const result = await controller.memifyVault(selectedVaultId, {
+            allSnapshots: options.allSnapshots,
+            trigger: "manual",
+            requestedBy: "cli",
+            agentId: options.agent,
+          });
+          printJson({
+            requestedDatasetName: options.datasetName,
+            matchingVaultIds,
+            ...result,
+          });
+          return;
+        } catch (error) {
+          if (!isMemifyCheckLaterError(error)) {
+            throw error;
+          }
+          printJson(
+            buildMemifyCheckLaterResult({
+              datasetName: options.datasetName,
+              matchingVaultIds,
+              vaultId: selectedVaultId,
+              agent: options.agent,
+              allSnapshots: options.allSnapshots,
+              error,
+            }),
+          );
+          return;
+        }
       }
 
-      printJson(
-        await controller.memifyVault(options.vault as string, {
-          allSnapshots: options.allSnapshots,
-          trigger: "manual",
-          requestedBy: "cli",
-          agentId: options.agent,
-        }),
-      );
+      try {
+        printJson(
+          await controller.memifyVault(options.vault as string, {
+            allSnapshots: options.allSnapshots,
+            trigger: "manual",
+            requestedBy: "cli",
+            agentId: options.agent,
+          }),
+        );
+      } catch (error) {
+        if (!isMemifyCheckLaterError(error)) {
+          throw error;
+        }
+        printJson(
+          buildMemifyCheckLaterResult({
+            vaultId: options.vault as string,
+            agent: options.agent,
+            allSnapshots: options.allSnapshots,
+            error,
+          }),
+        );
+      }
     });
 
   root

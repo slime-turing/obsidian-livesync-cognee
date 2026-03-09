@@ -1,5 +1,25 @@
+import { createCipheriv, createHash, pbkdf2Sync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { resolvePluginConfig } from "./config.js";
+
+const SETUP_URI_PREFIX = "obsidian://setuplivesync?settings=";
+
+function createSetupUriPayloadV2(input: string, passphrase: string): string {
+  const iv = Buffer.from("00112233445566778899aabbccddeeff", "hex");
+  const salt = Buffer.from("ffeeddccbbaa99887766554433221100", "hex");
+  const passphraseDigest = createHash("sha256").update(passphrase, "utf8").digest();
+  const key = pbkdf2Sync(passphraseDigest, salt, 100000, 32, "sha256");
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([cipher.update(input, "utf8"), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return `%${iv.toString("hex")}${salt.toString("hex")}${Buffer.concat([ciphertext, authTag]).toString("base64")}`;
+}
+
+function createSetupUri(payload: Record<string, unknown>, passphrase: string): string {
+  return `${SETUP_URI_PREFIX}${encodeURIComponent(
+    createSetupUriPayloadV2(JSON.stringify(payload), passphrase),
+  )}`;
+}
 
 describe("obsidian-livesync-cognee config", () => {
   it("parses a minimal vault config", () => {
@@ -58,6 +78,37 @@ describe("obsidian-livesync-cognee config", () => {
         ],
       }),
     ).toThrow("duplicate vault id: same");
+  });
+
+  it("rejects manual CouchDB and E2EE fields when setupUri is used", () => {
+    const setupUriPassphrase = "patient-haze";
+    const setupUri = createSetupUri(
+      {
+        couchDB_URI: "https://couchdb.example.invalid",
+        couchDB_DBNAME: "vault-a-db",
+        couchDB_USER: "user-a",
+        couchDB_PASSWORD: "password-a",
+        encrypt: true,
+        passphrase: "vault-passphrase",
+        usePathObfuscation: true,
+      },
+      setupUriPassphrase,
+    );
+
+    expect(() =>
+      resolvePluginConfig({
+        vaults: [
+          {
+            id: "vault-a",
+            setupUri,
+            setupUriPassphrase,
+            database: "conflicting-db",
+            username: "conflicting-user",
+            password: "conflicting-password",
+          },
+        ],
+      }),
+    ).toThrow("vaults[0] cannot set database, username, password when setupUri is used");
   });
 
   it("parses notifications and search settings", () => {

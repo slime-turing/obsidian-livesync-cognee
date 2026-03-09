@@ -239,4 +239,62 @@ describe("obsidian-livesync-cognee cli", () => {
       ),
     );
   });
+
+  it("prints a check-later hint when memify times out", async () => {
+    const program = new Command();
+    program.exitOverride();
+    const controller = {
+      ensureReady: vi.fn(async () => {}),
+      getStatuses: vi.fn(),
+      syncVault: vi.fn(),
+      syncAll: vi.fn(),
+      getConflicts: vi.fn(),
+      resolveConflict: vi.fn(),
+      compactVault: vi.fn(),
+      findCogneeVaultIdsByDatasetName: vi.fn(),
+      memifyVault: vi.fn(async () => {
+        throw new Error("AbortError: This operation was aborted");
+      }),
+      repairLocalVault: vi.fn(),
+      stopVaultTask: vi.fn(),
+      purgeVaultData: vi.fn(),
+    };
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    registerObsidianLivesyncCogneeCli({
+      program,
+      controller: controller as never,
+    });
+
+    await program.parseAsync(
+      ["obsidian-vault", "memify", "--vault", "vault-a", "--agent", "asst", "--all-snapshots"],
+      { from: "user" },
+    );
+
+    expect(controller.memifyVault).toHaveBeenCalledWith("vault-a", {
+      allSnapshots: true,
+      trigger: "manual",
+      requestedBy: "cli",
+      agentId: "asst",
+    });
+    expect(logSpy).toHaveBeenCalledWith(
+      JSON.stringify(
+        {
+          requestedDatasetName: undefined,
+          matchingVaultIds: undefined,
+          vaultId: "vault-a",
+          memified: false,
+          pending: true,
+          status: "check-later",
+          reason: "Cognee memify did not return before the CLI stopped waiting.",
+          error: "AbortError: This operation was aborted",
+          checkHint:
+            "Cognee memify is blocking by default, so the server may still be processing this dataset. Retry the memify command later or inspect the Cognee service logs.",
+          retryCommand: "openclaw obsidian-vault memify --vault vault-a --agent asst --all-snapshots",
+        },
+        null,
+        2,
+      ),
+    );
+  });
 });

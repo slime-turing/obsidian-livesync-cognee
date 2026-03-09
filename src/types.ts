@@ -44,6 +44,7 @@ export type ResolvedCogneeTarget = {
 
 export type ResolvedVaultConfig = {
   id: string;
+  configSource: "manual" | "setup-uri";
   url: string;
   database: string;
   username?: string;
@@ -58,9 +59,12 @@ export type ResolvedVaultConfig = {
   excludeGlobs: string[];
   mirrorRoot?: string;
   snapshotRoot?: string;
+  encrypt: boolean;
   passphrase?: string;
   usePathObfuscation: boolean;
   handleFilenameCaseSensitive: boolean;
+  e2eeAlgorithm?: string | number;
+  setupUriSettingVersion?: number;
   autoResolveConflicts: boolean;
   notifications: VaultNotificationConfig;
   automation: {
@@ -243,6 +247,10 @@ export type VaultMemifyResult = {
   vaultId: string;
   snapshotsConsidered: number;
   memified: boolean;
+  pending?: boolean;
+  status?: string;
+  pipelineRunId?: string;
+  checkHint?: string;
   datasetId?: string;
   datasetName?: string;
 };
@@ -282,6 +290,7 @@ export type CouchLeafDoc = {
   _rev?: string;
   type: "leaf";
   data?: string;
+  e_?: boolean;
   _deleted?: boolean;
 };
 
@@ -296,6 +305,7 @@ export type CouchNoteDoc = {
   ctime?: number;
   mtime?: number;
   size?: number;
+  e_?: boolean;
   deleted?: boolean;
   _deleted?: boolean;
   _conflicts?: string[];

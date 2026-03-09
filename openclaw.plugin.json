@@ -5,6 +5,15 @@
     "vaults.*.id": {
       "label": "Vault ID"
     },
+    "vaults.*.setupUri": {
+      "label": "LiveSync Setup URI",
+      "advanced": true
+    },
+    "vaults.*.setupUriPassphrase": {
+      "label": "Setup URI Passphrase",
+      "sensitive": true,
+      "advanced": true
+    },
     "vaults.*.url": {
       "label": "CouchDB URL"
     },
@@ -115,9 +124,35 @@
       "vault": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "url", "database"],
+        "oneOf": [
+          {
+            "required": ["id", "url", "database"],
+            "not": {
+              "anyOf": [
+                { "required": ["setupUri"] },
+                { "required": ["setupUriPassphrase"] }
+              ]
+            }
+          },
+          {
+            "required": ["id", "setupUri", "setupUriPassphrase"],
+            "not": {
+              "anyOf": [
+                { "required": ["url"] },
+                { "required": ["database"] },
+                { "required": ["username"] },
+                { "required": ["password"] },
+                { "required": ["passphrase"] },
+                { "required": ["usePathObfuscation"] },
+                { "required": ["handleFilenameCaseSensitive"] }
+              ]
+            }
+          }
+        ],
         "properties": {
           "id": { "type": "string" },
+          "setupUri": { "type": "string" },
+          "setupUriPassphrase": { "type": "string" },
           "url": { "type": "string" },
           "database": { "type": "string" },
           "username": { "type": "string" },
