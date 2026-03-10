@@ -15,6 +15,24 @@ type ToolOptions = {
 };
 
 export const INTERNAL_DEEP_GRAPH_SEARCH_AGENT_ID_PARAM = "__agentId";
+export const OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES = [
+  "obsidian_vault_status",
+  "obsidian_vault_sync",
+  "obsidian_vault_read",
+  "obsidian_vault_write",
+  "obsidian_vault_conflicts",
+  "obsidian_vault_deep_graph_search",
+  "obsidian_vault_resolve_conflict",
+  "obsidian_vault_memify",
+  "obsidian_vault_repair_local",
+  "obsidian_vault_stop_task",
+  "obsidian_vault_update_config",
+] as const;
+export const DEFAULT_EXPOSED_OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES = [
+  "obsidian_vault_deep_graph_search",
+] as const;
+
+export type ObsidianLivesyncCogneeToolName = (typeof OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES)[number];
 
 const statusSchema = {
   type: "object",
@@ -325,7 +343,7 @@ export function createObsidianLivesyncCogneeTools(options: ToolOptions): AnyAgen
 
   return [
     {
-      name: "obsidian_vault_status",
+      name: OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES[0],
       label: "Obsidian Vault Status",
       description: "List configured LiveSync vaults, sync status, conflict counts, and local mirror locations.",
       parameters: statusSchema,
@@ -342,7 +360,7 @@ export function createObsidianLivesyncCogneeTools(options: ToolOptions): AnyAgen
       },
     },
     {
-      name: "obsidian_vault_sync",
+      name: OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES[1],
       label: "Obsidian Vault Sync",
       description: "Run an on-demand sync from one LiveSync vault or all configured vaults.",
       parameters: syncSchema,
@@ -378,7 +396,7 @@ export function createObsidianLivesyncCogneeTools(options: ToolOptions): AnyAgen
       },
     },
     {
-      name: "obsidian_vault_read",
+      name: OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES[2],
       label: "Obsidian Vault Read",
       description: "Read a note from a configured LiveSync vault with source metadata and extracted links.",
       parameters: readSchema,
@@ -396,7 +414,7 @@ export function createObsidianLivesyncCogneeTools(options: ToolOptions): AnyAgen
       },
     },
     {
-      name: "obsidian_vault_write",
+      name: OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES[3],
       label: "Obsidian Vault Write",
       description: "Write plain markdown/text content back to a configured read-write LiveSync vault.",
       ownerOnly: true,
@@ -416,7 +434,7 @@ export function createObsidianLivesyncCogneeTools(options: ToolOptions): AnyAgen
       },
     },
     {
-      name: "obsidian_vault_conflicts",
+      name: OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES[4],
       label: "Obsidian Vault Conflicts",
       description: "List unresolved remote CouchDB conflicts detected during sync.",
       parameters: conflictListSchema,
@@ -437,7 +455,7 @@ export function createObsidianLivesyncCogneeTools(options: ToolOptions): AnyAgen
       },
     },
     {
-      name: "obsidian_vault_deep_graph_search",
+      name: OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES[5],
       label: "Obsidian Vault Deep Graph Search",
       description:
           "Explore the knowledge graph with bounded multi-hop retrieval. Volunteer this when the current memory is not enough for a 3-5 hop question, indirect time reasoning, delegation chains, or cross-note causality. In normal thinking, usually stop after 1-2 calls. In high-thinking mode, you may spend up to about 4 calls if each step adds a real new bridge. Stop earlier if source paths repeat, the new excerpts stop improving the chain, or you already have enough evidence to answer or abstain.",
@@ -507,7 +525,7 @@ export function createObsidianLivesyncCogneeTools(options: ToolOptions): AnyAgen
       },
     },
     {
-      name: "obsidian_vault_resolve_conflict",
+      name: OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES[6],
       label: "Obsidian Vault Resolve Conflict",
       description: "Resolve an unresolved remote CouchDB conflict after the user confirms which revision should win.",
       ownerOnly: true,
@@ -529,7 +547,7 @@ export function createObsidianLivesyncCogneeTools(options: ToolOptions): AnyAgen
       },
     },
     {
-      name: "obsidian_vault_memify",
+      name: OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES[7],
       label: "Obsidian Vault Memify",
       description: "Run Cognee memify for the current agent's dataset and persist the run status for later inspection.",
       ownerOnly: true,
@@ -561,7 +579,7 @@ export function createObsidianLivesyncCogneeTools(options: ToolOptions): AnyAgen
       },
     },
     {
-      name: "obsidian_vault_repair_local",
+      name: OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES[8],
       label: "Obsidian Vault Repair Local",
       description: "Rebuild deleted local mirror and snapshot directories by forcing a full vault resync.",
       ownerOnly: true,
@@ -582,7 +600,7 @@ export function createObsidianLivesyncCogneeTools(options: ToolOptions): AnyAgen
       },
     },
     {
-      name: "obsidian_vault_stop_task",
+      name: OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES[9],
       label: "Obsidian Vault Stop Task",
       description: "Cancel the active sync, memify, or repair task for one vault.",
       ownerOnly: true,
@@ -601,7 +619,7 @@ export function createObsidianLivesyncCogneeTools(options: ToolOptions): AnyAgen
       },
     },
     {
-      name: "obsidian_vault_update_config",
+      name: OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES[10],
       label: "Obsidian Vault Update Config",
       description: "Persist a vault config change into OpenClaw config and reload the plugin without waiting for a gateway restart.",
       ownerOnly: true,

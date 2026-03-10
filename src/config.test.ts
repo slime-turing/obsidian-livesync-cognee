@@ -1,6 +1,7 @@
 import { createCipheriv, createHash, hkdfSync, pbkdf2Sync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { resolvePluginConfig } from "./config.js";
+import { DEFAULT_EXPOSED_OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES } from "./tools.js";
 
 const SETUP_URI_PREFIX = "obsidian://setuplivesync?settings=";
 
@@ -55,6 +56,51 @@ describe("obsidian-livesync-cognee config", () => {
     expect(config.vaults[0]?.automation.memify.enabled).toBe(false);
     expect(config.vaults[0]?.automation.memify.minIntervalSeconds).toBe(3600);
     expect(config.vaults[0]?.cognee.searchType).toBe("CHUNKS");
+    expect(config.defaults.agentTools.defaultExpose).toEqual([
+      ...DEFAULT_EXPOSED_OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES,
+    ]);
+  });
+
+  it("parses custom default agent-exposed tools", () => {
+    const config = resolvePluginConfig({
+      defaults: {
+        agentTools: {
+          defaultExpose: ["obsidian_vault_deep_graph_search", "obsidian_vault_status", "obsidian_vault_read"],
+        },
+      },
+      vaults: [
+        {
+          id: "vault-a",
+          url: "https://couchdb.example.invalid",
+          database: "vault-a-db",
+        },
+      ],
+    });
+
+    expect(config.defaults.agentTools.defaultExpose).toEqual([
+      "obsidian_vault_deep_graph_search",
+      "obsidian_vault_status",
+      "obsidian_vault_read",
+    ]);
+  });
+
+  it("rejects unknown default agent-exposed tools", () => {
+    expect(() =>
+      resolvePluginConfig({
+        defaults: {
+          agentTools: {
+            defaultExpose: ["obsidian_vault_deep_graph_search", "obsidian_vault_not_real"],
+          },
+        },
+        vaults: [
+          {
+            id: "vault-a",
+            url: "https://couchdb.example.invalid",
+            database: "vault-a-db",
+          },
+        ],
+      }),
+    ).toThrow("defaults.agentTools.defaultExpose contains unknown tool: obsidian_vault_not_real");
   });
 
   it("resolves env placeholders inside secret fields", () => {

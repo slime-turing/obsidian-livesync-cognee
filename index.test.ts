@@ -4,6 +4,10 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AnyAgentTool, OpenClawPluginService } from "openclaw/plugin-sdk";
 import plugin from "./index.js";
+import {
+  DEFAULT_EXPOSED_OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES,
+  OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES,
+} from "./src/tools.js";
 
 type HookHandler = (event: any, ctx: any) => Promise<unknown> | unknown;
 
@@ -74,9 +78,10 @@ function summarizeScenarioFromTrace(entries: TraceEnvelope[], sessionKey: string
   };
 }
 
-function createRegisteredPlugin() {
+function createRegisteredPlugin(pluginConfigOverrides: Record<string, unknown> = {}) {
   const tools: string[] = [];
   const toolMap: Record<string, AnyAgentTool> = {};
+  const toolOptions: Record<string, { name?: string; optional?: boolean }> = {};
   const services: string[] = [];
   const cliCommands: string[][] = [];
   const hookNames: string[] = [];
@@ -104,19 +109,21 @@ function createRegisteredPlugin() {
           },
         },
       ],
+      ...pluginConfigOverrides,
     },
     runtime: {
-      state: { resolveStateDir: () => "/tmp/openclaw" },
+      state: { resolveStateDir: () => "__TEST_STATE_DIR__" },
       config: { loadConfig, writeConfigFile },
       system: { enqueueSystemEvent, requestHeartbeatNow },
     },
     logger: { info() {}, warn() {}, error() {} },
-    registerTool(tool: AnyAgentTool | ((...args: never[]) => unknown)) {
+    registerTool(tool: AnyAgentTool | ((...args: never[]) => unknown), opts?: { name?: string; optional?: boolean }) {
       if (typeof tool === "function") {
         return;
       }
       tools.push(tool.name);
       toolMap[tool.name] = tool;
+      toolOptions[tool.name] = opts ?? {};
     },
     registerService(service: OpenClawPluginService) {
       services.push(service.id);
@@ -140,6 +147,7 @@ function createRegisteredPlugin() {
   return {
     tools,
     toolMap,
+    toolOptions,
     services,
     cliCommands,
     hookNames,
@@ -167,26 +175,40 @@ describe("obsidian-livesync-cognee plugin", () => {
   });
 
   it("registers the expected tools and service", () => {
-    const { tools, services, cliCommands, hookNames, registerCommand } = createRegisteredPlugin();
+    const { tools, toolOptions, services, cliCommands, hookNames, registerCommand } = createRegisteredPlugin();
 
-    expect(tools).toEqual([
-      "obsidian_vault_status",
-      "obsidian_vault_sync",
-      "obsidian_vault_read",
-      "obsidian_vault_write",
-      "obsidian_vault_conflicts",
-      "obsidian_vault_deep_graph_search",
-      "obsidian_vault_resolve_conflict",
-      "obsidian_vault_memify",
-      "obsidian_vault_repair_local",
-      "obsidian_vault_stop_task",
-      "obsidian_vault_update_config",
-    ]);
+    expect(tools).toEqual([...OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES]);
+    const optionalTools = tools.filter((toolName) => toolOptions[toolName]?.optional === true);
+    expect(optionalTools).toEqual(
+      OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES.filter(
+        (toolName) => !DEFAULT_EXPOSED_OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES.includes(toolName),
+      ),
+    );
+    expect(toolOptions.obsidian_vault_deep_graph_search).toEqual({
+      name: "obsidian_vault_deep_graph_search",
+      optional: false,
+    });
     expect(services).toEqual(["obsidian-livesync-cognee"]);
     expect(cliCommands).toEqual([["obsidian-vault"]]);
     expect(registerCommand).toHaveBeenCalledWith(expect.objectContaining({ name: "obsidian-vault" }));
     expect(hookNames).toContain("before_prompt_build");
     expect(hookNames).toContain("llm_input");
+  });
+
+  it("promotes configured tools into the default agent-exposed set", () => {
+    const { toolOptions } = createRegisteredPlugin({
+      defaults: {
+        agentTools: {
+          defaultExpose: ["obsidian_vault_deep_graph_search", "obsidian_vault_status", "obsidian_vault_read"],
+        },
+      },
+    });
+
+    expect(toolOptions.obsidian_vault_deep_graph_search?.optional).toBe(false);
+    expect(toolOptions.obsidian_vault_status?.optional).toBe(false);
+    expect(toolOptions.obsidian_vault_read?.optional).toBe(false);
+    expect(toolOptions.obsidian_vault_sync?.optional).toBe(true);
+    expect(toolOptions.obsidian_vault_write?.optional).toBe(true);
   });
 
   it("keeps package, manifest, and runtime plugin versions aligned", async () => {

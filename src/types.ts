@@ -22,6 +22,10 @@ export type VaultMemifyAutomationConfig = {
   notifyOnFailure: boolean;
 };
 
+export type AgentToolExposureConfig = {
+  defaultExpose: string[];
+};
+
 export type ResolvedCogneeTarget = {
   enabled: boolean;
   baseUrl?: string;
@@ -74,6 +78,9 @@ export type ResolvedVaultConfig = {
 };
 
 export type ResolvedPluginConfig = {
+  defaults: {
+    agentTools: AgentToolExposureConfig;
+  };
   vaults: ResolvedVaultConfig[];
 };
 

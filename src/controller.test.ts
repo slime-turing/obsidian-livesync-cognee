@@ -27,6 +27,11 @@ async function waitFor(predicate: () => boolean, attempts = 50): Promise<void> {
 
 function createConfig(overrides: Partial<ResolvedPluginConfig["vaults"][number]> = {}): ResolvedPluginConfig {
   return {
+    defaults: {
+      agentTools: {
+        defaultExpose: ["obsidian_vault_deep_graph_search"],
+      },
+    },
     vaults: [
       {
         id: "vault-a",

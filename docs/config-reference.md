@@ -22,6 +22,7 @@ plugins:
 
 - `vaults` is required and must be an array.
 - `defaults` is optional and provides shared fallback values for vault entries.
+- `defaults.agentTools.defaultExpose` is optional and controls which Obsidian vault tools are exposed to agents by default.
 - String values support environment placeholder expansion like `${EXAMPLE_NAME}`.
 
 ## Valid vault definition styles
@@ -79,6 +80,7 @@ The `defaults` object is optional. It lets you define shared values once and reu
 | `defaults.syncMode` | Shared sync strategy fallback. | No | `changes`, `full` | `changes` | `changes` |
 | `defaults.mirrorRoot` | Shared mirror directory override. | No | Non-empty string path | Plugin-owned default mirror path | `/srv/openclaw/mirror` |
 | `defaults.snapshotRoot` | Shared snapshot directory override. | No | Non-empty string path | Plugin-owned default snapshot path | `/srv/openclaw/snapshots` |
+| `defaults.agentTools` | Shared default agent tool exposure for this plugin. | No | Object | Only `obsidian_vault_deep_graph_search` is exposed by default | See below |
 | `defaults.notifications` | Shared notification settings block. | No | Object | Built-in notification defaults | See below |
 | `defaults.automation` | Shared automation settings block. Currently this means `automation.memify`. | No | Object | Built-in automation defaults | See below |
 | `defaults.headers` | Shared extra HTTP headers for CouchDB requests. Vault-level headers are merged on top. | No | Object of string values | Empty object | `X-Forwarded-Host: livesync.example.invalid` |
@@ -114,6 +116,43 @@ Each item in `vaults` is one configured LiveSync vault.
 | `vaults[].notifications` | Notification settings for sync errors, conflicts, and wakeups. | No | Object | Built-in notification defaults | See below |
 | `vaults[].automation` | Automation settings. Currently supports automated memify. | No | Object | Built-in automation defaults | See below |
 | `vaults[].cognee` | Cognee ingestion and retrieval settings for this vault. | No | Object | Shared defaults or inherited memory-slot config | See below |
+
+## Agent tool exposure options
+
+`defaults.agentTools` controls which Obsidian vault tools are exposed to agents by default.
+
+| Option | Purpose | Required | Allowed values / range | Default | Example |
+| --- | --- | --- | --- | --- | --- |
+| `agentTools.defaultExpose` | Plugin tool names to expose to agents by default. Any Obsidian vault tool not listed here is still registered, but as an optional plugin tool that must be explicitly allowed. | No | Array of supported Obsidian vault tool names | `['obsidian_vault_deep_graph_search']` | `['obsidian_vault_deep_graph_search', 'obsidian_vault_status', 'obsidian_vault_read']` |
+
+Default behavior:
+
+- `obsidian_vault_deep_graph_search` is the only Obsidian vault tool exposed to agents by default.
+- CLI commands and `/obsidian-vault ...` channel commands are unaffected by this setting.
+- Optional plugin tools can still be enabled per agent with OpenClaw tool policy such as `agents.list[].tools.alsoAllow`.
+
+Example widening the default agent-visible set:
+
+```yaml
+plugins:
+  entries:
+    obsidian-livesync-cognee:
+      enabled: true
+      config:
+        defaults:
+          agentTools:
+            defaultExpose:
+              - obsidian_vault_deep_graph_search
+              - obsidian_vault_status
+              - obsidian_vault_read
+        vaults:
+          - id: team-notes
+            setupUri: ${OBSIDIAN_LIVESYNC_SETUP_URI}
+            setupUriPassphrase: ${OBSIDIAN_LIVESYNC_SETUP_URI_PASSPHRASE}
+            cognee:
+              enabled: true
+              datasetName: team-notes
+```
 
 ## Notification options
 
@@ -205,6 +244,9 @@ plugins:
       enabled: true
       config:
         defaults:
+          agentTools:
+            defaultExpose:
+              - obsidian_vault_deep_graph_search
           pollIntervalSeconds: 120
           requestTimeoutMs: 15000
           notifications:
@@ -248,6 +290,7 @@ plugins:
 - In manual mode, `url` and `database` are required.
 - Vault ids must be unique.
 - `datasetNames` maps OpenClaw agent ids to Cognee dataset names. `cognee.datasetName` on a vault should match one of those dataset names or the shared fallback dataset.
+- `defaults.agentTools.defaultExpose` must contain only supported Obsidian vault tool names.
 - If both `apiKeyEnv` and `apiKey` are set, the environment-variable form wins.
 - If both `authTokenEnv` and `authToken` are set, the environment-variable form wins.
 - `downloadHttpLinks` is off by default. Turn it on only if you want snapshots to include fetched external text context.

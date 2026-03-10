@@ -1,5 +1,6 @@
 import type { OpenClawPluginConfigSchema } from "openclaw/plugin-sdk";
 import type {
+  AgentToolExposureConfig,
   ResolvedCogneeTarget,
   ResolvedPluginConfig,
   ResolvedVaultConfig,
@@ -8,6 +9,10 @@ import type {
   VaultSyncMode,
 } from "./types.js";
 import { decodeSetupUri, isSetupUriFieldPresent } from "./setup-uri.js";
+import {
+  DEFAULT_EXPOSED_OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES,
+  OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES,
+} from "./tools.js";
 
 const DEFAULT_POLL_INTERVAL_SECONDS = 300;
 const DEFAULT_TIMEOUT_MS = 20_000;
@@ -20,6 +25,28 @@ const DEFAULT_MEMIFY_MIN_INTERVAL_SECONDS = 3600;
 type ResolvePluginConfigOptions = {
   openclawConfig?: unknown;
 };
+
+function parseAgentToolExposure(value: unknown, label: string): AgentToolExposureConfig {
+  if (value === undefined) {
+    return {
+      defaultExpose: [...DEFAULT_EXPOSED_OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES],
+    };
+  }
+  const objectValue = asObject(value, label);
+  const defaultExpose =
+    objectValue.defaultExpose === undefined
+      ? [...DEFAULT_EXPOSED_OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES]
+      : readStringArray(objectValue.defaultExpose, `${label}.defaultExpose`);
+  const knownToolNames = new Set<string>(OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES);
+  for (const toolName of defaultExpose) {
+    if (!knownToolNames.has(toolName)) {
+      throw new Error(`${label}.defaultExpose contains unknown tool: ${toolName}`);
+    }
+  }
+  return {
+    defaultExpose: Array.from(new Set(defaultExpose)),
+  };
+}
 
 function parseMemifyAutomation(value: unknown, label: string): VaultMemifyAutomationConfig {
   if (value === undefined) {
@@ -407,10 +434,16 @@ function parseVault(
 
 export function resolvePluginConfig(input: unknown, options: ResolvePluginConfigOptions = {}): ResolvedPluginConfig {
   if (input === undefined) {
-    return { vaults: [] };
+    return {
+      defaults: {
+        agentTools: parseAgentToolExposure(undefined, "defaults.agentTools"),
+      },
+      vaults: [],
+    };
   }
   const objectValue = asObject(input, "plugin config");
   const defaults = objectValue.defaults ? asObject(objectValue.defaults, "defaults") : {};
+  const agentTools = parseAgentToolExposure(defaults.agentTools, "defaults.agentTools");
   const inheritedCognee = parseMemorySlotCogneeTarget(options.openclawConfig);
   const vaultsValue = objectValue.vaults;
   if (!Array.isArray(vaultsValue)) {
@@ -424,7 +457,12 @@ export function resolvePluginConfig(input: unknown, options: ResolvePluginConfig
     }
     uniqueIds.add(vault.id);
   }
-  return { vaults };
+  return {
+    defaults: {
+      agentTools,
+    },
+    vaults,
+  };
 }
 
 export const obsidianLivesyncCogneeConfigSchema: OpenClawPluginConfigSchema = {
@@ -462,6 +500,20 @@ export const obsidianLivesyncCogneeConfigSchema: OpenClawPluginConfigSchema = {
           syncMode: { type: "string", enum: ["changes", "full"], default: "changes" },
           mirrorRoot: { type: "string" },
           snapshotRoot: { type: "string" },
+          agentTools: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              defaultExpose: {
+                type: "array",
+                items: {
+                  type: "string",
+                  enum: [...OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES],
+                },
+                default: [...DEFAULT_EXPOSED_OBSIDIAN_LIVESYNC_COGNEE_TOOL_NAMES],
+              },
+            },
+          },
           notifications: { type: "object" },
           automation: { type: "object" },
           headers: { type: "object", additionalProperties: { type: "string" } },

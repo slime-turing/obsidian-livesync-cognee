@@ -1,6 +1,6 @@
 {
   "id": "obsidian-livesync-cognee",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "uiHints": {
     "vaults.*.id": {
       "label": "Vault ID"
@@ -25,6 +25,10 @@
     },
     "vaults.*.notifications.sessionKey": {
       "label": "Notification Session Key"
+    },
+    "defaults.agentTools.defaultExpose": {
+      "label": "Default Agent-Exposed Vault Tools",
+      "advanced": true
     },
     "vaults.*.notifications.dedupeWindowSeconds": {
       "label": "Notification Dedupe Window (sec)",
@@ -55,6 +59,32 @@
           "syncMode": { "type": "string", "enum": ["changes", "full"], "default": "changes" },
           "mirrorRoot": { "type": "string" },
           "snapshotRoot": { "type": "string" },
+          "agentTools": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "defaultExpose": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "obsidian_vault_status",
+                    "obsidian_vault_sync",
+                    "obsidian_vault_read",
+                    "obsidian_vault_write",
+                    "obsidian_vault_conflicts",
+                    "obsidian_vault_deep_graph_search",
+                    "obsidian_vault_resolve_conflict",
+                    "obsidian_vault_memify",
+                    "obsidian_vault_repair_local",
+                    "obsidian_vault_stop_task",
+                    "obsidian_vault_update_config"
+                  ]
+                },
+                "default": ["obsidian_vault_deep_graph_search"]
+              }
+            }
+          },
           "notifications": { "$ref": "#/definitions/notifications" },
           "automation": {
             "type": "object",
